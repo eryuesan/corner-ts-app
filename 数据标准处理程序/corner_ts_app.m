@@ -12,9 +12,9 @@ fig = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
-rowHeights = repmat({27},1,28);
-rowHeights([1 4 9 14 17 21 26]) = {24};
-form = uigridlayout(sidebar,[28 3],'ColumnWidth',{132,'1x','1x'}, ...
+rowHeights = repmat({27},1,31);
+rowHeights([1 4 9 14 20 24 29]) = {24};
+form = uigridlayout(sidebar,[31 3],'ColumnWidth',{132,'1x','1x'}, ...
     'RowHeight',rowHeights,'RowSpacing',4,'ColumnSpacing',6,'Padding',[6 4 8 4], ...
     'BackgroundColor',[0.98 0.985 0.99],'Scrollable','on');
 
@@ -42,33 +42,38 @@ direct = fields(12,'直达波窗 / ms',[0 0],@gateChanged);
 echo = fields(13,'回波窗 / ms',[0 0],@gateChanged);
 sectionHeading(14,'固定横带背景抑制');
 bgWindow = fields(15,'背景时间窗 / ms',[0 0],@backgroundChanged);
-bgButton = uibutton(form,'Text','脉冲维去零频','Enable','off','ButtonPushedFcn',@removeBackground, ...
-    'Tooltip','在扫描脉冲和背景时间窗内减去平均波形，用于查看和选窗');
-wide(bgButton,16);
+bgMode = uidropdown(form,'Items',{'脉冲维高通','参考脉冲均值相减'},'ValueChangedFcn',@backgroundModeChanged);
+wide(bgMode,16);
+cutoff = fields(17,'截止 / (周期/脉冲)',0.01,@backgroundChanged);
+cutoff.Tooltip = '半功率截止频率，0.01 对应 100 次脉冲一个周期';
+bgRef = fields(18,'背景参考脉冲（首/末）',[1 1],@backgroundChanged);
+set(bgRef,'Enable','off');
+bgButton = uibutton(form,'Text','应用到扫描脉冲','Enable','off','ButtonPushedFcn',@removeBackground);
+wide(bgButton,19);
 
-sectionHeading(17,'收发距离与直达波参考');
-dist = fields(18,'距离 L / r（m）',[2.46 1.43],@invalidate);
+sectionHeading(20,'收发距离与直达波参考');
+dist = fields(21,'距离 L / r（m）',[2.46 1.43],@invalidate);
 dist(1).Tooltip = '发射换能器到目标的距离'; dist(2).Tooltip = '水听器到目标的距离';
 mode = uidropdown(form,'Items',{'逐脉冲直达波参考','固定脉冲直达波参考'}, ...
-    'ValueChangedFcn',@modeChanged); wide(mode,19);
-ref = fields(20,'固定参考脉冲',1,@invalidate); ref.Enable = 'off';
+    'ValueChangedFcn',@modeChanged); wide(mode,22);
+ref = fields(23,'固定参考脉冲',1,@invalidate); ref.Enable = 'off';
 
-sectionHeading(21,'目标强度计算');
-freq = fields(22,'TS 频点 / kHz',30,@frequencyChanged);
-sweepBand = fields(23,'扫频范围 / kHz',[20 40],@sweepChanged);
-step = fields(24,'扫频间隔 / kHz',0.2,@sweepChanged);
+sectionHeading(24,'目标强度计算');
+freq = fields(25,'TS 频点 / kHz',30,@frequencyChanged);
+sweepBand = fields(26,'扫频范围 / kHz',[20 40],@sweepChanged);
+step = fields(27,'扫频间隔 / kHz',0.2,@sweepChanged);
 singleButton = uibutton(form,'Text','计算单频 TS','ButtonPushedFcn',@calculate);
-singleButton.Layout.Row = 25; singleButton.Layout.Column = 1;
+singleButton.Layout.Row = 28; singleButton.Layout.Column = 1;
 sweepButton = uibutton(form,'Text','计算全频段 TS','ButtonPushedFcn',@calculateSweep);
-sweepButton.Layout.Row = 25; sweepButton.Layout.Column = [2 3];
+sweepButton.Layout.Row = 28; sweepButton.Layout.Column = [2 3];
 
-sectionHeading(26,'结果导出');
+sectionHeading(29,'结果导出');
 saveButton = uibutton(form,'Text','导出结果 MAT','Enable','off','ButtonPushedFcn',@saveResult);
-saveButton.Layout.Row = 27; saveButton.Layout.Column = 1;
+saveButton.Layout.Row = 30; saveButton.Layout.Column = 1;
 plotButton = uibutton(form,'Text','导出当前图 PNG + FIG','Enable','off','ButtonPushedFcn',@savePlot);
-plotButton.Layout.Row = 27; plotButton.Layout.Column = [2 3];
+plotButton.Layout.Row = 30; plotButton.Layout.Column = [2 3];
 bundle = uibutton(form,'Text','导出全部图表与数据','Enable','off','ButtonPushedFcn',@exportBundle);
-wide(bundle,28);
+wide(bundle,31);
 footer = uigridlayout(sidebar,[1 2],'ColumnWidth',{'1x',78},'Padding',[4 4 4 4], ...
     'ColumnSpacing',4,'BackgroundColor',[0.91 0.95 0.96]);
 status = uilabel(footer,'Text','请选择一次采集的日期时间文件夹。','WordWrap','on', ...
@@ -314,22 +319,43 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             drawGates(); showTrace();
         end
     end
+    function backgroundModeChanged(varargin)
+        hp = strcmp(bgMode.Value,'脉冲维高通');
+        cutoff.Enable = matlab.lang.OnOffSwitchState(hp);
+        set(bgRef,'Enable',matlab.lang.OnOffSwitchState(~hp));
+        backgroundChanged();
+    end
     function removeBackground(varargin)
         try
             assert(~isempty(bp),'请先完成带通滤波。');
             bounds = numbers(scan);
             assert(all(bounds==fix(bounds)) && bounds(1)>=1 && bounds(2)<=size(bp,2) && ...
-                bounds(2)>bounds(1),'去零频至少需要两个连续的有效扫描脉冲。');
+                bounds(2)>=bounds(1),'请选择有效的扫描脉冲范围。');
             rows = samplesIn(bgWindow); cols = bounds(1):bounds(2);
-            block = bp(rows,cols);
+            if strcmp(bgMode.Value,'脉冲维高通')
+                fc = numbers(cutoff);
+                assert(fc>0 && fc<0.5,'截止频率须在 0 到 0.5 周期/脉冲之间，不含端点。');
+                assert(numel(cols)>=2,'沿脉冲维高通至少需要两次脉冲。');
+                filtered = pulseHighpass(bp(rows,cols),fc);
+                description = sprintf('高通 %.4g 周期/脉冲',fc);
+                if fc*numel(cols)<1
+                    description = [description '（扫描段不足一个截止周期）'];
+                end
+            else
+                refs = numbers(bgRef);
+                assert(all(refs==fix(refs)) && refs(1)>=1 && refs(2)<=size(bp,2) && ...
+                    refs(1)<=refs(2),'请选择有效的背景参考脉冲范围。');
+                filtered = bp(rows,cols) - mean(bp(rows,refs(1):refs(2)),2);
+                description = sprintf('已减去参考脉冲 %d–%d 的均值',refs);
+            end
             clean = bp;
-            clean(rows,cols) = block - mean(block,2);
+            clean(rows,cols) = filtered;
             cleanPulses = bounds;
             resetPick(); view.Value = cleanView; tabs.SelectedTab = waveTab; drawMap();
-            status.Text = sprintf('已去除脉冲 %d–%d、%.4g–%.4g ms 内的零频背景。', ...
-                bounds,(rows([1 end])-1)*1000/fs);
+            status.Text = sprintf('%s · 脉冲 %d–%d · %.4g–%.4g ms', ...
+                description,bounds,(rows([1 end])-1)*1000/fs);
         catch err
-            uialert(fig,err.message,'脉冲维去零频');
+            uialert(fig,err.message,'固定横带背景抑制');
         end
     end
     function loadFolder(varargin)
@@ -392,6 +418,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         raw = values; fs = rate; folder = selected; activeChannel = channel; bp = []; mf = [];
         clean = []; cleanPulses = []; bgButton.Enable = 'off';
         if ~sameRecord
+            bgRef(1).Value = 1; bgRef(2).Value = count;
             scan(1).Value = 1; scan(2).Value = count; ref.Value = 1; pulse.Value = 1;
             for h = [direct echo bgWindow], h.Value = 0; end
             if strcmp(id,'20261031_151830') && count>=833 && samples>=4780
@@ -459,7 +486,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         if strcmp(view.Value,cleanView) && isempty(clean)
             view.Value = '带通波形';
             if isempty(bp), view.Value = '原始波形'; end
-            status.Text = '请先完成带通滤波，选择背景时间窗并点击「脉冲维去零频」。';
+            status.Text = '请先完成带通滤波，选择背景时间窗并点击「应用到扫描脉冲」。';
         elseif isempty(displayed()) && ~strcmp(view.Value,'原始波形')
             view.Value = '原始波形'; status.Text = '请先完成滤波。';
         end
@@ -877,6 +904,23 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             uialert(fig,err.message,'导出失败');
         end
     end
+end
+
+function filtered = pulseHighpass(block,fc)
+% 沿每行的脉冲序列作偶对称延拓，再施加二阶巴特沃斯形状的零相位幅频响应。
+n = size(block,2);
+bins = 0:2*n-1;
+f = min(bins,2*n-bins)/(2*n); % 周期/脉冲，正负频率取相同增益
+gain = zeros(size(f));
+gain(2:end) = 1./sqrt(1+(fc./f(2:end)).^4);
+filtered = zeros(size(block),'like',block);
+for startRow = 1:64:size(block,1)
+    rows = startRow:min(startRow+63,size(block,1));
+    data = block(rows,:);
+    extended = [data fliplr(data)];
+    y = ifft(fft(extended,[],2).*gain,[],2,'symmetric');
+    filtered(rows,:) = y(:,1:n);
+end
 end
 
 function [direct,echo] = windowAmplitudes(d,e,fs,frequencies,dlg)
