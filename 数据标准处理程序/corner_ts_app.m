@@ -3,6 +3,7 @@ function corner_ts_app
 project = fileparts(fileparts(mfilename('fullpath')));
 raw = []; bp = []; mf = []; fs = []; folder = ''; result = [];
 activeChannel = '';
+clean = []; cleanPulses = []; cleanView = '脉冲维去背景';
 scaleSettings = struct('wave',struct('mode','自动','limits',[]), ...
                        'ts',struct('mode','自动','limits',[]));
 pickStart = []; gateLines = gobjects(0);
@@ -11,9 +12,9 @@ fig = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
-rowHeights = repmat({27},1,25);
-rowHeights([1 4 9 14 18 23]) = {24};
-form = uigridlayout(sidebar,[25 3],'ColumnWidth',{132,'1x','1x'}, ...
+rowHeights = repmat({27},1,28);
+rowHeights([1 4 9 14 17 21 26]) = {24};
+form = uigridlayout(sidebar,[28 3],'ColumnWidth',{132,'1x','1x'}, ...
     'RowHeight',rowHeights,'RowSpacing',4,'ColumnSpacing',6,'Padding',[6 4 8 4], ...
     'BackgroundColor',[0.98 0.985 0.99],'Scrollable','on');
 
@@ -39,30 +40,35 @@ scan = fields(10,'扫描脉冲（首 / 末）',[1 1],@gateChanged);
 angle = fields(11,'首末角度 / °',[0 360],@invalidate);
 direct = fields(12,'直达波窗 / ms',[0 0],@gateChanged);
 echo = fields(13,'回波窗 / ms',[0 0],@gateChanged);
+sectionHeading(14,'固定横带背景抑制');
+bgWindow = fields(15,'背景时间窗 / ms',[0 0],@backgroundChanged);
+bgButton = uibutton(form,'Text','脉冲维去零频','Enable','off','ButtonPushedFcn',@removeBackground, ...
+    'Tooltip','在扫描脉冲和背景时间窗内减去平均波形，用于查看和选窗');
+wide(bgButton,16);
 
-sectionHeading(14,'收发距离与直达波参考');
-dist = fields(15,'距离 L / r（m）',[2.46 1.43],@invalidate);
+sectionHeading(17,'收发距离与直达波参考');
+dist = fields(18,'距离 L / r（m）',[2.46 1.43],@invalidate);
 dist(1).Tooltip = '发射换能器到目标的距离'; dist(2).Tooltip = '水听器到目标的距离';
 mode = uidropdown(form,'Items',{'逐脉冲直达波参考','固定脉冲直达波参考'}, ...
-    'ValueChangedFcn',@modeChanged); wide(mode,16);
-ref = fields(17,'固定参考脉冲',1,@invalidate); ref.Enable = 'off';
+    'ValueChangedFcn',@modeChanged); wide(mode,19);
+ref = fields(20,'固定参考脉冲',1,@invalidate); ref.Enable = 'off';
 
-sectionHeading(18,'目标强度计算');
-freq = fields(19,'TS 频点 / kHz',30,@frequencyChanged);
-sweepBand = fields(20,'扫频范围 / kHz',[20 40],@sweepChanged);
-step = fields(21,'扫频间隔 / kHz',0.2,@sweepChanged);
+sectionHeading(21,'目标强度计算');
+freq = fields(22,'TS 频点 / kHz',30,@frequencyChanged);
+sweepBand = fields(23,'扫频范围 / kHz',[20 40],@sweepChanged);
+step = fields(24,'扫频间隔 / kHz',0.2,@sweepChanged);
 singleButton = uibutton(form,'Text','计算单频 TS','ButtonPushedFcn',@calculate);
-singleButton.Layout.Row = 22; singleButton.Layout.Column = 1;
+singleButton.Layout.Row = 25; singleButton.Layout.Column = 1;
 sweepButton = uibutton(form,'Text','计算全频段 TS','ButtonPushedFcn',@calculateSweep);
-sweepButton.Layout.Row = 22; sweepButton.Layout.Column = [2 3];
+sweepButton.Layout.Row = 25; sweepButton.Layout.Column = [2 3];
 
-sectionHeading(23,'结果导出');
+sectionHeading(26,'结果导出');
 saveButton = uibutton(form,'Text','导出结果 MAT','Enable','off','ButtonPushedFcn',@saveResult);
-saveButton.Layout.Row = 24; saveButton.Layout.Column = 1;
+saveButton.Layout.Row = 27; saveButton.Layout.Column = 1;
 plotButton = uibutton(form,'Text','导出当前图 PNG + FIG','Enable','off','ButtonPushedFcn',@savePlot);
-plotButton.Layout.Row = 24; plotButton.Layout.Column = [2 3];
+plotButton.Layout.Row = 27; plotButton.Layout.Column = [2 3];
 bundle = uibutton(form,'Text','导出全部图表与数据','Enable','off','ButtonPushedFcn',@exportBundle);
-wide(bundle,25);
+wide(bundle,28);
 footer = uigridlayout(sidebar,[1 2],'ColumnWidth',{'1x',78},'Padding',[4 4 4 4], ...
     'ColumnSpacing',4,'BackgroundColor',[0.91 0.95 0.96]);
 status = uilabel(footer,'Text','请选择一次采集的日期时间文件夹。','WordWrap','on', ...
@@ -81,9 +87,9 @@ waveLayout = uigridlayout(waveViewport,[6 1],'RowHeight',{40,420,36,20,36,420}, 
 bar = uigridlayout(waveLayout,[1 6],'ColumnWidth',{36,106,36,150,122,'1x'}, ...
     'Padding',[8 4 8 4],'ColumnSpacing',6,'BackgroundColor',barColor);
 uilabel(bar,'Text','波形','FontWeight','bold','FontColor',ink);
-view = uidropdown(bar,'Items',{'原始波形','带通波形','匹配滤波'},'ValueChangedFcn',@changeView);
+view = uidropdown(bar,'Items',{'原始波形','带通波形','匹配滤波',cleanView},'ValueChangedFcn',@changeView);
 uilabel(bar,'Text','选窗','FontWeight','bold','FontColor',ink);
-pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗','点两次选回波窗'}, ...
+pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗','点两次选回波窗','点两次选背景窗'}, ...
     'ValueChangedFcn',@armPick);
 uibutton(bar,'Text','显示整组波形图','ButtonPushedFcn',@drawMap, ...
     'BackgroundColor',[0.16 0.36 0.41],'FontColor','white');
@@ -277,6 +283,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     end
     function filterChanged(src,~)
         if any(src==band)
+            clean = []; cleanPulses = []; bgButton.Enable = 'off';
+            if strcmp(view.Value,cleanView), view.Value = '带通波形'; end
             bp = []; invalidate(); staleView = '带通波形';
         else
             mf = []; staleView = '匹配滤波';
@@ -295,7 +303,34 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         title(map,'点击「显示整组波形图」查看热图');
     end
     function gateChanged(varargin)
+        if ~isempty(clean) && ~isequal(cleanPulses,numbers(scan)), backgroundChanged(); end
         invalidate(); drawGates(); showTrace();
+    end
+    function backgroundChanged(varargin)
+        clean = []; cleanPulses = [];
+        if strcmp(view.Value,cleanView)
+            view.Value = '带通波形'; drawMap();
+        else
+            drawGates(); showTrace();
+        end
+    end
+    function removeBackground(varargin)
+        try
+            assert(~isempty(bp),'请先完成带通滤波。');
+            bounds = numbers(scan);
+            assert(all(bounds==fix(bounds)) && bounds(1)>=1 && bounds(2)<=size(bp,2) && ...
+                bounds(2)>bounds(1),'去零频至少需要两个连续的有效扫描脉冲。');
+            rows = samplesIn(bgWindow); cols = bounds(1):bounds(2);
+            block = bp(rows,cols);
+            clean = bp;
+            clean(rows,cols) = block - mean(block,2);
+            cleanPulses = bounds;
+            resetPick(); view.Value = cleanView; tabs.SelectedTab = waveTab; drawMap();
+            status.Text = sprintf('已去除脉冲 %d–%d、%.4g–%.4g ms 内的零频背景。', ...
+                bounds,(rows([1 end])-1)*1000/fs);
+        catch err
+            uialert(fig,err.message,'脉冲维去零频');
+        end
     end
     function loadFolder(varargin)
         startDir = fullfile(project,'数据');
@@ -355,9 +390,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         readSeconds = toc(readTimer);
         sameRecord = strcmp(folder,selected) && isequal(size(raw),size(values)) && isequal(fs,rate);
         raw = values; fs = rate; folder = selected; activeChannel = channel; bp = []; mf = [];
+        clean = []; cleanPulses = []; bgButton.Enable = 'off';
         if ~sameRecord
             scan(1).Value = 1; scan(2).Value = count; ref.Value = 1; pulse.Value = 1;
-            for h = [direct echo], h.Value = 0; end
+            for h = [direct echo bgWindow], h.Value = 0; end
             if strcmp(id,'20261031_151830') && count>=833 && samples>=4780
                 scan(1).Value = 112; scan(2).Value = 833;
                 gates = ([1050 2011 3362 4780]-1)*1000/fs;
@@ -403,6 +439,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 end
             end
             if isBand
+                clean = []; cleanPulses = []; bgButton.Enable = 'on';
                 bp = filtered; invalidate(); view.Value = '带通波形';
             else
                 mf = filtered; view.Value = '匹配滤波';
@@ -419,7 +456,11 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     end
     function changeView(varargin)
         resetPick();
-        if isempty(displayed()) && ~strcmp(view.Value,'原始波形')
+        if strcmp(view.Value,cleanView) && isempty(clean)
+            view.Value = '带通波形';
+            if isempty(bp), view.Value = '原始波形'; end
+            status.Text = '请先完成带通滤波，选择背景时间窗并点击「脉冲维去零频」。';
+        elseif isempty(displayed()) && ~strcmp(view.Value,'原始波形')
             view.Value = '原始波形'; status.Text = '请先完成滤波。';
         end
         drawMap();
@@ -428,11 +469,12 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         pickStart = [];
         if strcmp(pick.Value,'点击查看脉冲'), return; end
         if isempty(bp), resetPick(); status.Text = '请先完成滤波。'; return; end
-        if ~strcmp(view.Value,'带通波形'), view.Value = '带通波形'; drawMap(); end
+        if ~ismember(view.Value,{'带通波形',cleanView}), view.Value = '带通波形'; drawMap(); end
         status.Text = '请点两个边界。热图横轴选脉冲、纵轴选时间；单脉冲图横轴选时间。';
     end
     function values = displayed()
         switch view.Value
+            case cleanView, values = clean;
             case '带通波形', values = bp;
             case '匹配滤波', values = mf;
             otherwise, values = raw;
@@ -462,15 +504,17 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         switch pick.Value
             case '点两次选扫描范围', target = scan; value = k;
             case '点两次选直达波窗', target = direct; value = point(2);
+            case '点两次选背景窗', target = bgWindow; value = point(2);
             otherwise, target = echo; value = point(2);
         end
         setBoundary(target,value);
     end
     function traceClick(~,event)
-        if isempty(bp) || ~strcmp(view.Value,'带通波形'), return; end
+        if isempty(bp) || ~ismember(view.Value,{'带通波形',cleanView}), return; end
         switch pick.Value
             case '点两次选直达波窗', target = direct;
             case '点两次选回波窗', target = echo;
+            case '点两次选背景窗', target = bgWindow;
             otherwise, return
         end
         value = max(0,min(event.IntersectionPoint(1),(size(bp,1)-1)*1000/fs));
@@ -482,15 +526,20 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         else
             bounds = sort([pickStart value]);
             target(1).Value = bounds(1); target(2).Value = bounds(2);
-            resetPick(); gateChanged(); status.Text = '窗口已更新。';
+            resetPick();
+            if isequal(target,bgWindow), backgroundChanged(); else, gateChanged(); end
+            status.Text = '窗口已更新。';
         end
     end
     function drawGates()
         delete(gateLines(isgraphics(gateLines))); gateLines = gobjects(0);
-        if isempty(raw) || ~strcmp(view.Value,'带通波形'), return; end
-        gateLines = gobjects(3,2);
+        if isempty(raw) || ~ismember(view.Value,{'带通波形',cleanView}), return; end
+        gateLines = gobjects(4,2);
         for k = 1:2
             gateLines(1,k) = xline(map,scan(k).Value,'w--','HitTest','off');
+            if bgWindow(2).Value>bgWindow(1).Value
+                gateLines(4,k) = yline(map,bgWindow(k).Value,'y:','HitTest','off');
+            end
             if direct(2).Value>direct(1).Value
                 gateLines(2,k) = yline(map,direct(k).Value,'c-','HitTest','off');
             end
@@ -508,7 +557,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         title(trace,sprintf('脉冲 %d · %s',k,view.Value)); grid(trace,'on');
         pbaspect(trace,[2 1 1]);
         configurePreview(trace); disableDefaultInteractivity(trace);
-        if strcmp(view.Value,'带通波形')
+        if ismember(view.Value,{'带通波形',cleanView})
+            if bgWindow(2).Value>bgWindow(1).Value
+                for h = bgWindow, xline(trace,h.Value,':','Color',[.60 .40 0],'HitTest','off'); end
+            end
             if direct(2).Value>direct(1).Value
                 for h = direct, xline(trace,h.Value,'--','Color',[0 .52 .55],'HitTest','off'); end
             end
