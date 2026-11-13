@@ -4,6 +4,7 @@ project = fileparts(fileparts(mfilename('fullpath')));
 raw = []; bp = []; mf = []; fs = []; folder = ''; result = [];
 activeChannel = '';
 clean = []; cleanPulses = []; cleanView = '脉冲维去背景';
+backgroundPending = false;
 scaleSettings = struct('wave',struct('mode','自动','limits',[]), ...
                        'ts',struct('mode','自动','limits',[]));
 pickStart = []; gateLines = gobjects(0);
@@ -12,9 +13,9 @@ fig = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
-rowHeights = repmat({27},1,31);
-rowHeights([1 4 9 14 20 24 29]) = {24};
-form = uigridlayout(sidebar,[31 3],'ColumnWidth',{132,'1x','1x'}, ...
+rowHeights = repmat({27},1,32);
+rowHeights([1 4 9 16 20 24 29]) = {24};
+form = uigridlayout(sidebar,[32 3],'ColumnWidth',{132,'1x','1x'}, ...
     'RowHeight',rowHeights,'RowSpacing',4,'ColumnSpacing',6,'Padding',[6 4 8 4], ...
     'BackgroundColor',[0.98 0.985 0.99],'Scrollable','on');
 
@@ -35,21 +36,22 @@ bpButton.Layout.Row = 8; bpButton.Layout.Column = 1;
 mfButton = uibutton(form,'Text','匹配滤波','ButtonPushedFcn',@filterData);
 mfButton.Layout.Row = 8; mfButton.Layout.Column = [2 3];
 
-sectionHeading(9,'扫描范围与时间窗');
+sectionHeading(9,'固定横带背景抑制');
 scan = fields(10,'扫描脉冲（首 / 末）',[1 1],@gateChanged);
-angle = fields(11,'首末角度 / °',[0 360],@invalidate);
-direct = fields(12,'直达波窗 / ms',[0 0],@gateChanged);
-echo = fields(13,'回波窗 / ms',[0 0],@gateChanged);
-sectionHeading(14,'固定横带背景抑制');
-bgWindow = fields(15,'背景时间窗 / ms',[0 0],@backgroundChanged);
+set(scan,'Tooltip','背景抑制与 TS 共用此范围；首末角度对应这两个脉冲。');
+bgWindow = fields(11,'背景时间窗 / ms',[0 0],@backgroundChanged);
 bgMode = uidropdown(form,'Items',{'脉冲维高通','参考脉冲均值相减'},'ValueChangedFcn',@backgroundModeChanged);
-wide(bgMode,16);
-cutoff = fields(17,'截止 / (周期/脉冲)',0.01,@backgroundChanged);
+wide(bgMode,12);
+cutoff = fields(13,'截止 / (周期/脉冲)',0.01,@backgroundChanged);
 cutoff.Tooltip = '半功率截止频率，0.01 对应 100 次脉冲一个周期';
-bgRef = fields(18,'背景参考脉冲（首/末）',[1 1],@backgroundChanged);
+bgRef = fields(14,'背景参考脉冲（首/末）',[1 1],@backgroundChanged);
 set(bgRef,'Enable','off');
 bgButton = uibutton(form,'Text','应用到扫描脉冲','Enable','off','ButtonPushedFcn',@removeBackground);
-wide(bgButton,19);
+wide(bgButton,15);
+sectionHeading(16,'扫描范围与时间窗');
+angle = fields(17,'首末角度 / °',[0 360],@invalidate);
+direct = fields(18,'直达波窗 / ms',[0 0],@gateChanged);
+echo = fields(19,'回波窗 / ms',[0 0],@gateChanged);
 
 sectionHeading(20,'收发距离与直达波参考');
 dist = fields(21,'距离 L / r（m）',[2.46 1.43],@invalidate);
@@ -68,12 +70,17 @@ sweepButton = uibutton(form,'Text','计算全频段 TS','ButtonPushedFcn',@calcu
 sweepButton.Layout.Row = 28; sweepButton.Layout.Column = [2 3];
 
 sectionHeading(29,'结果导出');
+sizeLabel = uilabel(form,'Text','导出图幅');
+sizeLabel.Layout.Row = 30; sizeLabel.Layout.Column = 1;
+exportSize = uidropdown(form,'Items',{'小图 · 8 × 6 cm · 8 pt','大图 · 16 × 12 cm · 11 pt'}, ...
+    'ItemsData',[8 16],'Value',8);
+exportSize.Layout.Row = 30; exportSize.Layout.Column = [2 3];
 saveButton = uibutton(form,'Text','导出结果 MAT','Enable','off','ButtonPushedFcn',@saveResult);
-saveButton.Layout.Row = 30; saveButton.Layout.Column = 1;
+saveButton.Layout.Row = 31; saveButton.Layout.Column = 1;
 plotButton = uibutton(form,'Text','导出当前图 PNG + FIG','Enable','off','ButtonPushedFcn',@savePlot);
-plotButton.Layout.Row = 30; plotButton.Layout.Column = [2 3];
+plotButton.Layout.Row = 31; plotButton.Layout.Column = [2 3];
 bundle = uibutton(form,'Text','导出全部图表与数据','Enable','off','ButtonPushedFcn',@exportBundle);
-wide(bundle,31);
+wide(bundle,32);
 footer = uigridlayout(sidebar,[1 2],'ColumnWidth',{'1x',78},'Padding',[4 4 4 4], ...
     'ColumnSpacing',4,'BackgroundColor',[0.91 0.95 0.96]);
 status = uilabel(footer,'Text','请选择一次采集的日期时间文件夹。','WordWrap','on', ...
@@ -109,7 +116,7 @@ pulse = uieditfield(traceBar,'numeric','Value',1,'RoundFractionalValues','on','L
 trace = uiaxes(waveLayout);
 resultLayout = uigridlayout(resultTab,[5 1],'RowHeight',{40,'1x',0,0,54}, ...
     'Padding',[12 10 12 10],'RowSpacing',4,'BackgroundColor','white');
-figureNames = {'单频 TS','带通回波时间–角度图','多频点 TS–角度曲线','多角度 TS–频率曲线', ...
+figureNames = {'单频 TS','回波时间–角度图','多频点 TS–角度曲线','多角度 TS–频率曲线', ...
     'TS 频率–角度谱','频带能量平均 TS–角度曲线','角度能量平均 TS–频率曲线'};
 resultBar = uigridlayout(resultLayout,[1 3],'ColumnWidth',{52,230,'1x'}, ...
     'Padding',[8 4 8 4],'ColumnSpacing',6,'BackgroundColor',barColor);
@@ -288,6 +295,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     end
     function filterChanged(src,~)
         if any(src==band)
+            backgroundPending = backgroundPending || ~isempty(clean);
             clean = []; cleanPulses = []; bgButton.Enable = 'off';
             if strcmp(view.Value,cleanView), view.Value = '带通波形'; end
             bp = []; invalidate(); staleView = '带通波形';
@@ -312,6 +320,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         invalidate(); drawGates(); showTrace();
     end
     function backgroundChanged(varargin)
+        if ~isempty(clean)
+            backgroundPending = true;
+            invalidate();
+        end
         clean = []; cleanPulses = [];
         if strcmp(view.Value,cleanView)
             view.Value = '带通波形'; drawMap();
@@ -351,6 +363,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             clean = bp;
             clean(rows,cols) = filtered;
             cleanPulses = bounds;
+            backgroundPending = false;
+            invalidate();
             resetPick(); view.Value = cleanView; tabs.SelectedTab = waveTab; drawMap();
             status.Text = sprintf('%s · 脉冲 %d–%d · %.4g–%.4g ms', ...
                 description,bounds,(rows([1 end])-1)*1000/fs);
@@ -416,6 +430,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         readSeconds = toc(readTimer);
         sameRecord = strcmp(folder,selected) && isequal(size(raw),size(values)) && isequal(fs,rate);
         raw = values; fs = rate; folder = selected; activeChannel = channel; bp = []; mf = [];
+        backgroundPending = false;
         clean = []; cleanPulses = []; bgButton.Enable = 'off';
         if ~sameRecord
             bgRef(1).Value = 1; bgRef(2).Value = count;
@@ -466,6 +481,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 end
             end
             if isBand
+                backgroundPending = backgroundPending || ~isempty(clean);
                 clean = []; cleanPulses = []; bgButton.Enable = 'on';
                 bp = filtered; invalidate(); view.Value = '带通波形';
             else
@@ -496,7 +512,16 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         pickStart = [];
         if strcmp(pick.Value,'点击查看脉冲'), return; end
         if isempty(bp), resetPick(); status.Text = '请先完成滤波。'; return; end
-        if ~ismember(view.Value,{'带通波形',cleanView}), view.Value = '带通波形'; drawMap(); end
+        wanted = '带通波形';
+        if ismember(pick.Value,{'点两次选直达波窗','点两次选回波窗'})
+            if backgroundPending
+                resetPick(); status.Text = '请重新应用背景抑制后再选取时间窗。'; return
+            end
+            if ~isempty(clean), wanted = cleanView; end
+        elseif strcmp(view.Value,cleanView)
+            wanted = cleanView;
+        end
+        if ~strcmp(view.Value,wanted), view.Value = wanted; drawMap(); end
         status.Text = '请点两个边界。热图横轴选脉冲、纵轴选时间；单脉冲图横轴选时间。';
     end
     function values = displayed()
@@ -625,6 +650,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         cleanup = onCleanup(@() close(dlg));
         try
             assert(~isempty(bp),'请先完成滤波。');
+            assert(~backgroundPending,'背景抑制参数或输入已改变，请重新应用到扫描脉冲后再计算 TS。');
+            [signal,signalSource] = analysisSignal();
             bounds = numbers(scan); angles = numbers(angle); geometry = numbers(dist);
             assert(all(bounds==fix(bounds)) && bounds(1)>=1 && diff(bounds)>=0 && ...
                 bounds(2)<=size(bp,2),'扫描范围须为有效的原始脉冲序号。');
@@ -666,7 +693,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             elseif ~fullBand && ~isempty(result) && result.frequency_Hz==ff
                 pdAll = result.directAmplitude; peAll = result.echoAmplitude;
             else
-                [pdAll,peAll] = windowAmplitudes(bp(d,refs),bp(e,pulses),fs,frequencies,dlg);
+                [pdAll,peAll] = windowAmplitudes(signal(d,refs),signal(e,pulses),fs,frequencies,dlg);
             end
             assert(all(pdAll(:)>0 & isfinite(pdAll(:))),'直达波幅值无效，请检查参考脉冲和直达波窗。');
             ratios = peAll*r./(pdAll*((L-r)/L));
@@ -695,6 +722,15 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 next.spectrum = result.spectrum;
             end
             next.colorScale = scaleSettings;
+            next.signalSource = signalSource;
+            if ~isempty(clean)
+                next.background = struct('method',bgMode.Value,'pulseRange',cleanPulses,'window_ms',numbers(bgWindow));
+                if strcmp(bgMode.Value,'脉冲维高通')
+                    next.background.cutoff_cyclesPerPulse = numbers(cutoff);
+                else
+                    next.background.referencePulseRange = numbers(bgRef);
+                end
+            end
             result = next;
             if isfield(result,'spectrum')
                 figureChoice.Items = figureNames;
@@ -705,10 +741,17 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
             if fullBand, figureChoice.Value = figureNames{5}; else, figureChoice.Value = figureNames{1}; end
             showResult(); saveButton.Enable = 'on'; plotButton.Enable = 'on';
-            tabs.SelectedTab = resultTab; status.Text = '计算完成，可切换结果图或导出。';
+            tabs.SelectedTab = resultTab; status.Text = ['计算完成 · TS 数据来源：' signalSource];
         catch err
             if ~fullBand && ~isempty(result), freq.Value = result.frequency_Hz/1000; end
             uialert(fig,err.message,'无法计算 TS');
+        end
+    end
+    function [signal,source] = analysisSignal()
+        if isempty(clean)
+            signal = bp; source = '带通波形';
+        else
+            signal = clean; source = cleanView;
         end
     end
     function showResult(varargin)
@@ -750,7 +793,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 plot(ax,theta,result.TS_dB,'-','LineWidth',1.2);
             case figureNames{2}
                 idx = result.echoSamples(1):result.echoSamples(2);
-                info = heat(ax,theta,(idx-1)*1000/fs,20*log10(abs(bp(idx,result.pulse))),scaleSettings.wave,true);
+                signal = analysisSignal();
+                info = heat(ax,theta,(idx-1)*1000/fs,20*log10(abs(signal(idx,result.pulse))),scaleSettings.wave,true);
                 ytext = '时间 / ms';
             case figureNames{3}
                 targets = ceil(f(1)/5)*5:5:floor(f(end)/5)*5;
@@ -797,13 +841,13 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         end
     end
     function exportFigurePair(kind,base,source)
-        widthCM = 8; heightCM = 6;
+        widthCM = exportSize.Value; heightCM = widthCM*3/4;
         paper = figure('Visible','off','WindowStyle','normal','Color','w', ...
             'Units','centimeters','Position',[2 2 widthCM heightCM], ...
             'PaperUnits','centimeters','PaperSize',[widthCM heightCM], ...
             'PaperPosition',[0 0 widthCM heightCM],'NumberTitle','off','Name',kind);
         closePaper = onCleanup(@() close(paper));
-        tiles = tiledlayout(paper,1,1,'Padding','compact','TileSpacing','compact');
+        tiles = tiledlayout(paper,1,1,'Padding','tight','TileSpacing','tight');
         ax = nexttile(tiles);
         if nargin<3 || source==curve
             renderResult(ax,kind);
@@ -824,16 +868,9 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 savedBar = colorbar(ax); savedBar.Ticks = cb.Ticks;
             end
         end
-        ax.FontUnits = 'points'; ax.FontSize = 8;
-        if ~isempty(ax.Legend)
-            ax.Legend.FontSize = 7;
-            ax.Legend.NumColumns = min(3,numel(ax.Legend.String));
-            ax.Legend.Layout.Tile = 'south';
-        end
+        formatExportLayout(paper,tiles,ax,widthCM);
         drawnow;
-        exportgraphics(paper,[base '.png'],'Resolution',300,'Units','centimeters', ...
-            'Width',widthCM,'Height',heightCM,'Padding','figure', ...
-            'PreserveAspectRatio','on','BackgroundColor','white');
+        print(paper,[base '.png'],'-dpng','-r300');
         % 使保存的普通 MATLAB 图窗重新打开时可见、可编辑。
         paper.Visible = 'on';
         savefig(paper,[base '.fig']);
@@ -904,6 +941,50 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             uialert(fig,err.message,'导出失败');
         end
     end
+end
+
+function formatExportLayout(paper,tiles,ax,widthCM)
+% 布局按最终字号为轴标签、图例和色条分配空间，整个画布保持固定尺寸。
+tiles.Padding = 'tight'; tiles.TileSpacing = 'tight';
+fontPt = 8;
+if widthCM==16, fontPt = 11; end
+ax.FontUnits = 'points'; ax.FontSize = fontPt;
+ax.LabelFontSizeMultiplier = 1; ax.TitleFontSizeMultiplier = 1;
+for cb = reshape(findall(paper,'Type','colorbar'),1,[])
+    cb.FontSize = fontPt;
+end
+for label = reshape(findall(paper,'Type','text'),1,[])
+    label.FontUnits = 'points'; label.FontSize = fontPt;
+end
+lg = ax.Legend;
+if ~isempty(lg)
+    lg.FontUnits = 'points'; lg.FontSize = fontPt;
+    lg.Box = 'off'; lg.ItemTokenSize(1) = 1.5*fontPt;
+    lg.Location = 'southoutside'; lg.Units = 'centimeters';
+    % 测量排版后的图例，选择能放入画布的最大列数。
+    for cols = numel(lg.String):-1:1
+        lg.NumColumns = cols;
+        drawnow;
+        if lg.Position(3)<=widthCM-0.1, break; end
+    end
+    lg.Layout.Tile = 'south';
+end
+% 在固定纸面上测量刻度、标签、图例和色条的实际外缘，再扩大内部布局。
+% 保留约 0.5 mm 的安全边，防止字符贴边或截断。
+tiles.Units = 'normalized';
+for pass = 1:3
+    drawnow;
+    raster = print(paper,'-RGBImage','-r300');
+    ink = min(raster,[],3)<225;
+    x = find(any(ink,1)); y = find(any(ink,2));
+    if isempty(x) || isempty(y), break; end
+    h = size(ink,1); w = size(ink,2);
+    margins = [x(1)-1 h-y(end) w-x(end) y(1)-1];
+    delta = (margins-6)./[w h w h];
+    if max(abs(margins-6))<=3, break; end
+    pos = tiles.OuterPosition;
+    tiles.OuterPosition = pos + [-delta(1:2),delta(1)+delta(3),delta(2)+delta(4)];
+end
 end
 
 function filtered = pulseHighpass(block,fc)
