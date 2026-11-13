@@ -1,4 +1,31 @@
 function corner_ts_app
+home = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized');
+shell = uigridlayout(home,[5 3],'RowHeight',{'1x',48,65,65,'1x'}, ...
+    'ColumnWidth',{'1x',300,'1x'},'BackgroundColor',[.95 .97 .97]);
+h = uilabel(shell,'Text','选择数据处理类型','FontSize',22,'HorizontalAlignment','center');
+h.Layout.Row = 2; h.Layout.Column = 2;
+names = {'合置处理','分置处理'}; sessions = gobjects(1,2);
+for k=1:2
+    b = uibutton(shell,'Text',names{k},'FontSize',18,'ButtonPushedFcn',@(~,~) enter(k));
+    b.Layout.Row = k+2; b.Layout.Column = 2;
+end
+home.CloseRequestFcn = @finish;
+    function enter(index)
+        if ~isgraphics(sessions(index))
+            sessions(index) = processingSession(index==2,@back);
+            sessions(index).CloseRequestFcn = @(src,~) back(src);
+        end
+        sessions(index).Visible = 'on'; home.Visible = 'off';
+    end
+    function back(page)
+        home.Visible = 'on'; page.Visible = 'off';
+    end
+    function finish(varargin)
+        delete(sessions(isgraphics(sessions))); delete(home);
+    end
+end
+
+function fig = processingSession(bistatic,goHome)
 % 角反射体 TS 处理界面。支持单频与频率扫描，每列对应一个原始脉冲。
 project = fileparts(fileparts(mfilename('fullpath')));
 raw = []; bp = []; mf = []; fs = []; folder = ''; result = [];
@@ -9,7 +36,10 @@ scaleSettings = struct('wave',struct('mode','自动','limits',[]), ...
                        'ts',struct('mode','自动','limits',[]));
 pickStart = []; gateLines = gobjects(0);
 
-fig = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized');
+pageName = '合置处理'; if bistatic, pageName = '分置处理'; end
+fig = uifigure('Name',['角反射体试验 · ' pageName],'WindowState','maximized');
+echoResults = {}; editor = []; echoSelect = [];
+combined = []; compareName = '多窗相干与非相干 TS';
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
@@ -36,9 +66,11 @@ bpButton.Layout.Row = 8; bpButton.Layout.Column = 1;
 mfButton = uibutton(form,'Text','匹配滤波','ButtonPushedFcn',@filterData);
 mfButton.Layout.Row = 8; mfButton.Layout.Column = [2 3];
 
-sectionHeading(9,'固定横带背景抑制');
+if bistatic, sectionHeading(9,'扫描脉冲'); else, sectionHeading(9,'固定横带背景抑制'); end
 scan = fields(10,'扫描脉冲（首 / 末）',[1 1],@gateChanged);
 set(scan,'Tooltip','背景抑制与 TS 共用此范围；首末角度对应这两个脉冲。');
+bgWindow = []; bgRef = []; bgButton = [];
+if ~bistatic
 bgWindow = fields(11,'背景时间窗 / ms',[0 0],@backgroundChanged);
 bgMode = uidropdown(form,'Items',{'脉冲维高通','参考脉冲均值相减'},'ValueChangedFcn',@backgroundModeChanged);
 wide(bgMode,12);
@@ -48,10 +80,22 @@ bgRef = fields(14,'背景参考脉冲（首/末）',[1 1],@backgroundChanged);
 set(bgRef,'Enable','off');
 bgButton = uibutton(form,'Text','应用到扫描脉冲','Enable','off','ButtonPushedFcn',@removeBackground);
 wide(bgButton,15);
+else
+    set(scan,'Tooltip','按接收方位顺序选择首、末脉冲');
+    form.RowHeight(11:15) = repmat({0},1,5);
+end
 sectionHeading(16,'扫描范围与时间窗');
 angle = fields(17,'首末角度 / °',[0 360],@invalidate);
 direct = fields(18,'直达波窗 / ms',[0 0],@gateChanged);
-echo = fields(19,'回波窗 / ms',[0 0],@gateChanged);
+if bistatic
+    editor = uigridlayout(form,[2 4],'ColumnWidth',{75,'1x','1x',32},'Padding',[0 0 0 0], ...
+        'RowHeight',{27,27},'RowSpacing',3);
+    wide(editor,19); echo = gobjects(0,2); echoLabels = gobjects(0); removeButtons = gobjects(0);
+    plus = uibutton(editor,'Text','＋ 添加回波窗','ButtonPushedFcn',@appendWindow);
+    appendWindow();
+else
+    echo = fields(19,'回波窗 / ms',[0 0],@gateChanged);
+end
 
 sectionHeading(20,'收发距离与直达波参考');
 dist = fields(21,'距离 L / r（m）',[2.46 1.43],@invalidate);
@@ -59,6 +103,10 @@ dist(1).Tooltip = '发射换能器到目标的距离'; dist(2).Tooltip = '水听
 mode = uidropdown(form,'Items',{'逐脉冲直达波参考','固定脉冲直达波参考'}, ...
     'ValueChangedFcn',@modeChanged); wide(mode,22);
 ref = fields(23,'固定参考脉冲',1,@invalidate); ref.Enable = 'off';
+if bistatic
+    mode.Items = {'固定脉冲直达波参考'}; mode.Value = mode.Items{1}; ref.Enable = 'on';
+    ref.Tooltip = '使用共线位置（发射阵—水听器—目标）的参考脉冲，参考距离 L−r';
+end
 
 sectionHeading(24,'目标强度计算');
 freq = fields(25,'TS 频点 / kHz',30,@frequencyChanged);
@@ -81,12 +129,13 @@ plotButton = uibutton(form,'Text','导出当前图 PNG + FIG','Enable','off','Bu
 plotButton.Layout.Row = 31; plotButton.Layout.Column = [2 3];
 bundle = uibutton(form,'Text','导出全部图表与数据','Enable','off','ButtonPushedFcn',@exportBundle);
 wide(bundle,32);
-footer = uigridlayout(sidebar,[1 2],'ColumnWidth',{'1x',78},'Padding',[4 4 4 4], ...
+footer = uigridlayout(sidebar,[1 3],'ColumnWidth',{'1x',62,72},'Padding',[4 4 4 4], ...
     'ColumnSpacing',4,'BackgroundColor',[0.91 0.95 0.96]);
 status = uilabel(footer,'Text','请选择一次采集的日期时间文件夹。','WordWrap','on', ...
     'FontColor',[0.12 0.27 0.32],'BackgroundColor',[0.91 0.95 0.96]);
 refreshButton = uibutton(footer,'Text','刷新视图','Tooltip','按当前选窗和色阶重绘本页', ...
     'Enable','off','ButtonPushedFcn',@refreshView);
+uibutton(footer,'Text','返回首页','ButtonPushedFcn',@(~,~) goHome(fig));
 
 tabs = uitabgroup(layout);
 waveTab = uitab(tabs,'Title','波形与选窗'); resultTab = uitab(tabs,'Title','TS 结果');
@@ -103,6 +152,9 @@ view = uidropdown(bar,'Items',{'原始波形','带通波形','匹配滤波',clea
 uilabel(bar,'Text','选窗','FontWeight','bold','FontColor',ink);
 pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗','点两次选回波窗','点两次选背景窗'}, ...
     'ValueChangedFcn',@armPick);
+if bistatic
+    view.Items = view.Items(1:3); syncPick();
+end
 uibutton(bar,'Text','显示整组波形图','ButtonPushedFcn',@drawMap, ...
     'BackgroundColor',[0.16 0.36 0.41],'FontColor','white');
 map = uiaxes(waveLayout);
@@ -122,6 +174,10 @@ resultBar = uigridlayout(resultLayout,[1 3],'ColumnWidth',{52,230,'1x'}, ...
     'Padding',[8 4 8 4],'ColumnSpacing',6,'BackgroundColor',barColor);
 uilabel(resultBar,'Text','结果图','FontWeight','bold','FontColor',ink);
 figureChoice = uidropdown(resultBar,'Items',figureNames(1),'ValueChangedFcn',@showResult);
+if bistatic
+    echoSelect = uidropdown(resultBar,'Items',{'回波 1'},'ItemsData',1,'Enable','off', ...
+        'Tooltip','选择要查看或单独导出的回波','ValueChangedFcn',@chooseResult);
+end
 curve = uiaxes(resultLayout);
 resultScale = scaleBar(resultLayout); resultScale.row.Visible = 'off';
 resultInfo = uilabel(resultLayout,'Text','','FontSize',11,'FontColor',ink);
@@ -137,6 +193,50 @@ sizeWavePage();
 drawnow;
 scroll(waveLayout,'top');
 fig.WindowButtonUpFcn = @captureDraggedScale;
+    function appendWindow(varargin)
+        n = size(echo,1)+1;
+        echoLabels(n) = uilabel(editor,'Text','');
+        for col = 1:2
+            echo(n,col) = uieditfield(editor,'numeric','ValueChangedFcn',@gateChanged);
+        end
+        removeButtons(n) = uibutton(editor,'Text','−','Tooltip','删除这条回波窗','ButtonPushedFcn',@dropWindow);
+        layoutWindows();
+        if n>1, syncPick(); gateChanged(); end
+    end
+    function dropWindow(src,~)
+        n = find(removeButtons==src,1);
+        delete(echo(n,:)); delete(echoLabels(n)); delete(removeButtons(n));
+        echo(n,:)=[]; echoLabels(n)=[]; removeButtons(n)=[];
+        layoutWindows(); syncPick(); gateChanged();
+    end
+    function layoutWindows()
+        n = size(echo,1);
+        editor.RowHeight = repmat({27},1,n+1); form.RowHeight{19} = 27*(n+1)+3*n;
+        for j=1:n
+            echoLabels(j).Text = sprintf('回波 %d / ms',j);
+            controls = [echoLabels(j) echo(j,:) removeButtons(j)];
+            for c=1:4, controls(c).Layout.Row=j; controls(c).Layout.Column=c; end
+            removeButtons(j).Enable = matlab.lang.OnOffSwitchState(n>1);
+        end
+        plus.Layout.Row=n+1; plus.Layout.Column=[1 4];
+    end
+    function syncPick()
+        pickStart = []; pick.Items = [{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗'}, ...
+            reshape(cellstr(compose('点两次选回波窗 %d',1:size(echo,1))),1,[])];
+        pick.Value=pick.Items{1};
+    end
+    function handles = pickedEcho()
+        if bistatic
+            index = find(strcmp(pick.Items,pick.Value),1)-3;
+            handles = echo(index,:);
+        else
+            handles = echo;
+        end
+    end
+    function chooseResult(varargin)
+        captureDraggedScale(); result = echoResults{echoSelect.Value};
+        result.colorScale = scaleSettings; showResult();
+    end
     function sizeWavePage(varargin)
         % 顶部操作栏、热图及其色阶说明占一屏；下一屏用于浏览单条脉冲。
         viewportPixels = getpixelposition(waveViewport);
@@ -282,6 +382,9 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         assert(all(isfinite(vals)),'参数必须为有限数值。');
     end
     function invalidate(varargin)
+        combined = [];
+        echoResults = {};
+        if bistatic, echoSelect.Enable = 'off'; end
         captureDraggedScale();
         resultScale.row.Visible = 'off'; resultInfo.Text = '';
         resultLayout.RowHeight = {40,'1x',0,0,54};
@@ -296,7 +399,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     function filterChanged(src,~)
         if any(src==band)
             backgroundPending = backgroundPending || ~isempty(clean);
-            clean = []; cleanPulses = []; bgButton.Enable = 'off';
+            clean = []; cleanPulses = []; if ~bistatic, bgButton.Enable = 'off'; end
             if strcmp(view.Value,cleanView), view.Value = '带通波形'; end
             bp = []; invalidate(); staleView = '带通波形';
         else
@@ -338,6 +441,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         backgroundChanged();
     end
     function removeBackground(varargin)
+        dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title','背景抑制','Message','处理选区');
+        cleanup = onCleanup(@() close(dlg));
         try
             assert(~isempty(bp),'请先完成带通滤波。');
             bounds = numbers(scan);
@@ -348,7 +453,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 fc = numbers(cutoff);
                 assert(fc>0 && fc<0.5,'截止频率须在 0 到 0.5 周期/脉冲之间，不含端点。');
                 assert(numel(cols)>=2,'沿脉冲维高通至少需要两次脉冲。');
-                filtered = pulseHighpass(bp(rows,cols),fc);
+                filtered = pulseHighpass(bp(rows,cols),fc,dlg);
                 description = sprintf('高通 %.4g 周期/脉冲',fc);
                 if fc*numel(cols)<1
                     description = [description '（扫描段不足一个截止周期）'];
@@ -360,6 +465,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 filtered = bp(rows,cols) - mean(bp(rows,refs(1):refs(2)),2);
                 description = sprintf('已减去参考脉冲 %d–%d 的均值',refs);
             end
+            checkCancel(dlg);
             clean = bp;
             clean(rows,cols) = filtered;
             cleanPulses = bounds;
@@ -369,6 +475,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             status.Text = sprintf('%s · 脉冲 %d–%d · %.4g–%.4g ms', ...
                 description,bounds,(rows([1 end])-1)*1000/fs);
         catch err
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'固定横带背景抑制');
         end
     end
@@ -396,6 +503,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             readChannel(selected,channels{index});
             channelMenu.Items = channels; channelMenu.Value = activeChannel; channelMenu.Enable = 'on';
         catch err
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'读取失败');
         end
     end
@@ -404,11 +512,12 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             readChannel(folder,src.Value);
         catch err
             src.Value = activeChannel;
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'切换通道失败');
         end
     end
     function readChannel(selected,channel)
-        dlg = uiprogressdlg(fig,'Title','读取采集记录','Message','正在读取文件');
+        dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title','读取采集记录','Message','正在读取文件');
         cleanup = onCleanup(@() close(dlg));
         [~,id] = fileparts(selected);
         meta = jsondecode(fileread(fullfile(selected,[id '.json'])));
@@ -425,18 +534,19 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             assert(isnumeric(v) && isreal(v) && isvector(v) && numel(v)==samples && ...
                 all(isfinite(v(:))),'文件 %s 的波形或采样点数异常。',name);
             values(:,k) = double(v(:));
-            if mod(k,20)==0, dlg.Value = k/count; end
+            if mod(k,20)==0, dlg.Value = k/count; checkCancel(dlg); end
         end
+        checkCancel(dlg);
         readSeconds = toc(readTimer);
         sameRecord = strcmp(folder,selected) && isequal(size(raw),size(values)) && isequal(fs,rate);
         raw = values; fs = rate; folder = selected; activeChannel = channel; bp = []; mf = [];
         backgroundPending = false;
-        clean = []; cleanPulses = []; bgButton.Enable = 'off';
+        clean = []; cleanPulses = []; if ~bistatic, bgButton.Enable = 'off'; end
         if ~sameRecord
-            bgRef(1).Value = 1; bgRef(2).Value = count;
+            if ~bistatic, bgRef(1).Value = 1; bgRef(2).Value = count; end
             scan(1).Value = 1; scan(2).Value = count; ref.Value = 1; pulse.Value = 1;
-            for h = [direct echo bgWindow], h.Value = 0; end
-            if strcmp(id,'20261031_151830') && count>=833 && samples>=4780
+            for h = [direct reshape(echo,1,[]) bgWindow], h.Value = 0; end
+            if ~bistatic && strcmp(id,'20261031_151830') && count>=833 && samples>=4780
                 scan(1).Value = 112; scan(2).Value = 833;
                 gates = ([1050 2011 3362 4780]-1)*1000/fs;
                 boxes = [direct echo];
@@ -451,7 +561,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     end
     function filterData(src,~)
         isBand = src==bpButton;
-        dlg = uiprogressdlg(fig,'Title',src.Text,'Message','0%','Value',0);
+        dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title',src.Text,'Message','0%','Value',0);
         cleanup = onCleanup(@() close(dlg));
         try
             assert(~isempty(raw),'请先读取采集文件夹。');
@@ -476,13 +586,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 if pct~=lastPct
                     dlg.Value = k/count;
                     dlg.Message = sprintf('%s  %d%%  （%d / %d 次脉冲）',src.Text,pct,k,count);
-                    drawnow limitrate nocallbacks
+                    checkCancel(dlg);
                     lastPct = pct;
                 end
             end
+            checkCancel(dlg);
             if isBand
                 backgroundPending = backgroundPending || ~isempty(clean);
-                clean = []; cleanPulses = []; bgButton.Enable = 'on';
+                clean = []; cleanPulses = []; if ~bistatic, bgButton.Enable = 'on'; end
                 bp = filtered; invalidate(); view.Value = '带通波形';
             else
                 mf = filtered; view.Value = '匹配滤波';
@@ -491,6 +602,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             dlg.Message = '100% · 正在显示滤波结果'; drawMap();
             status.Text = [src.Text '完成。'];
         catch err
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'滤波失败');
         end
     end
@@ -513,7 +625,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         if strcmp(pick.Value,'点击查看脉冲'), return; end
         if isempty(bp), resetPick(); status.Text = '请先完成滤波。'; return; end
         wanted = '带通波形';
-        if ismember(pick.Value,{'点两次选直达波窗','点两次选回波窗'})
+        if strcmp(pick.Value,'点两次选直达波窗') || startsWith(pick.Value,'点两次选回波窗')
             if backgroundPending
                 resetPick(); status.Text = '请重新应用背景抑制后再选取时间窗。'; return
             end
@@ -557,7 +669,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             case '点两次选扫描范围', target = scan; value = k;
             case '点两次选直达波窗', target = direct; value = point(2);
             case '点两次选背景窗', target = bgWindow; value = point(2);
-            otherwise, target = echo; value = point(2);
+            otherwise, target = pickedEcho(); value = point(2);
         end
         setBoundary(target,value);
     end
@@ -565,9 +677,11 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         if isempty(bp) || ~ismember(view.Value,{'带通波形',cleanView}), return; end
         switch pick.Value
             case '点两次选直达波窗', target = direct;
-            case '点两次选回波窗', target = echo;
+
             case '点两次选背景窗', target = bgWindow;
-            otherwise, return
+            otherwise
+                if ~startsWith(pick.Value,'点两次选回波窗'), return; end
+                target = pickedEcho();
         end
         value = max(0,min(event.IntersectionPoint(1),(size(bp,1)-1)*1000/fs));
         setBoundary(target,value);
@@ -589,14 +703,17 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         gateLines = gobjects(4,2);
         for k = 1:2
             gateLines(1,k) = xline(map,scan(k).Value,'w--','HitTest','off');
-            if bgWindow(2).Value>bgWindow(1).Value
+            if ~bistatic && bgWindow(2).Value>bgWindow(1).Value
                 gateLines(4,k) = yline(map,bgWindow(k).Value,'y:','HitTest','off');
             end
             if direct(2).Value>direct(1).Value
                 gateLines(2,k) = yline(map,direct(k).Value,'c-','HitTest','off');
             end
-            if echo(2).Value>echo(1).Value
-                gateLines(3,k) = yline(map,echo(k).Value,'m-','HitTest','off');
+            for j=1:size(echo,1)
+                if echo(j,2).Value>echo(j,1).Value
+                    gateLines(4+j,k) = yline(map,echo(j,k).Value,'m-','HitTest','off');
+                    if bistatic && k==1, gateLines(4+j,k).Label = sprintf('回波 %d',j); end
+                end
             end
         end
     end
@@ -610,14 +727,16 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         pbaspect(trace,[2 1 1]);
         configurePreview(trace); disableDefaultInteractivity(trace);
         if ismember(view.Value,{'带通波形',cleanView})
-            if bgWindow(2).Value>bgWindow(1).Value
+            if ~bistatic && bgWindow(2).Value>bgWindow(1).Value
                 for h = bgWindow, xline(trace,h.Value,':','Color',[.60 .40 0],'HitTest','off'); end
             end
             if direct(2).Value>direct(1).Value
                 for h = direct, xline(trace,h.Value,'--','Color',[0 .52 .55],'HitTest','off'); end
             end
-            if echo(2).Value>echo(1).Value
-                for h = echo, xline(trace,h.Value,'-','Color',[.70 .12 .52],'HitTest','off'); end
+            for j=1:size(echo,1)
+                if echo(j,2).Value>echo(j,1).Value
+                    for h = echo(j,:), xline(trace,h.Value,'-','Color',[.70 .12 .52],'HitTest','off'); end
+                end
             end
         end
     end
@@ -640,13 +759,19 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     function sweepChanged(varargin)
         if ~isempty(result) && isfield(result,'spectrum')
             result = rmfield(result,'spectrum');
-            figureChoice.Items = figureNames(1:2); figureChoice.Value = figureNames{1};
+            if bistatic
+                for j=1:numel(echoResults), echoResults{j}=rmfield(echoResults{j},'spectrum'); end
+                combined = selectCombination(combined,result.frequency_Hz);
+            end
+            items = figureNames(1:2);
+            if bistatic, items{end+1} = compareName; end
+            figureChoice.Items = items; figureChoice.Value = figureNames{1};
             bundle.Enable = 'off'; showResult();
         end
         status.Text = '扫频参数已更新。点击“计算全频段 TS”生成新频谱。';
     end
     function compute(fullBand)
-        dlg = uiprogressdlg(fig,'Title','计算 TS','Message','提取窗内幅值');
+        dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title','计算 TS','Message','提取窗内幅值');
         cleanup = onCleanup(@() close(dlg));
         try
             assert(~isempty(bp),'请先完成滤波。');
@@ -661,8 +786,19 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             if isscalar(pulses), theta = angles(1); end
             L = geometry(1); r = geometry(2);
             assert(L>r && r>0,'当前传播修正要求 L > r > 0。');
-            d = samplesIn(direct); e = samplesIn(echo); ff = numbers(freq)*1000;
+            d = samplesIn(direct); ff = numbers(freq)*1000;
+            windows = cell(1,size(echo,1));
+            for j=1:numel(windows)
+                try
+                    windows{j} = samplesIn(echo(j,:));
+                catch gateError
+                    error('回波窗 %d：%s',j,gateError.message);
+                end
+            end
             b = numbers(band)*1000;
+            if bistatic && numel(unique([windows{:}]))~=sum(cellfun(@numel,windows))
+                error('回波窗在采样点上重叠，强度相加会重复计入回波。请分开各窗后再计算。');
+            end
             assert(ff>=b(1) && ff<=b(2),'TS 频点应在带通频带内。');
 
             refs = pulses;
@@ -683,55 +819,90 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
             % 改窗、角度、距离、带通或通道时，已有 result 会先失效。
             % 此处只复用参数仍相同的结果；网格外的频点独立计算。
-            cachedRow = [];
-            if ~fullBand && isfield(result,'spectrum')
-                cachedRow = find(abs(result.spectrum.frequency_Hz-ff)<=8*eps(ff),1);
-            end
-            if ~isempty(cachedRow)
-                pdAll = result.spectrum.directAmplitude(cachedRow,:);
-                peAll = result.spectrum.echoAmplitude(cachedRow,:);
-            elseif ~fullBand && ~isempty(result) && result.frequency_Hz==ff
-                pdAll = result.directAmplitude; peAll = result.echoAmplitude;
-            else
-                [pdAll,peAll] = windowAmplitudes(signal(d,refs),signal(e,pulses),fs,frequencies,dlg);
-            end
-            assert(all(pdAll(:)>0 & isfinite(pdAll(:))),'直达波幅值无效，请检查参考脉冲和直达波窗。');
-            ratios = peAll*r./(pdAll*((L-r)/L));
-            assert(all(isfinite(ratios(:)) & ratios(:)>0),'TS 幅值无效，请检查脉冲与时间窗。');
-            selected = find(frequencies==ff,1);
-            pd = pdAll(selected,:); pe = peAll(selected,:);
-            ratio = ratios(selected,:); ts = 20*log10(ratio);
-            next = struct('folder',folder,'channel',activeChannel,'fs_Hz',fs,'band_kHz',numbers(band), ...
-                'lfm_kHz',numbers(chirp),'pulseWidth_ms',numbers(width),'frequency_Hz',ff, ...
-                'pulse',pulses,'referenceMode',mode.Value,'referencePulse',refs, ...
-                'angle_deg',theta,'angleLimits_deg',angles,'directSamples',d([1 end]),'echoSamples',e([1 end]), ...
-                'direct_ms',numbers(direct),'echo_ms',numbers(echo),'L_m',L,'r_m',r, ...
-                'directAmplitude',pd,'echoAmplitude',pe,'TS_dB',ts, ...
-                'energyMean_dB',10*log10(angleMeanPower(theta,ratio.^2)),'peakToPeak_dB',max(ts)-min(ts));
-            if fullBand
-                [~,rows] = ismember(gridHz,frequencies);
-                next.spectrum = summarizeSpectrum(theta,gridHz,ratios(rows,:));
-                next.spectrum.directAmplitude = pdAll(rows,:);
-                next.spectrum.echoAmplitude = peAll(rows,:);
-                if numel(theta)>1 && abs(abs(theta(end)-theta(1))-360)<1e-8 && strcmp(mode.Value,'逐脉冲直达波参考')
-                    diameter = 4*10^(next.spectrum.mean_dB/20);
-                    next.spectrum.equivalentDiameter_m = diameter;
-                    next.spectrum.kaRange = pi*gridHz([1 end])'*diameter/1500;
+            computed = cell(size(windows));
+            for w=1:numel(windows)
+                e = windows{w};
+                previous = result;
+                if bistatic && ~isempty(echoResults), previous = echoResults{w}; end
+                cachedRow = [];
+                if ~fullBand && isfield(previous,'spectrum')
+                    cachedRow = find(abs(previous.spectrum.frequency_Hz-ff)<=8*eps(ff),1);
                 end
-            elseif isfield(result,'spectrum')
-                next.spectrum = result.spectrum;
-            end
-            next.colorScale = scaleSettings;
-            next.signalSource = signalSource;
-            if ~isempty(clean)
-                next.background = struct('method',bgMode.Value,'pulseRange',cleanPulses,'window_ms',numbers(bgWindow));
-                if strcmp(bgMode.Value,'脉冲维高通')
-                    next.background.cutoff_cyclesPerPulse = numbers(cutoff);
+                if ~isempty(cachedRow)
+                    pdAll = previous.spectrum.directAmplitude(cachedRow,:);
+                    peAll = previous.spectrum.echoAmplitude(cachedRow,:);
+                elseif ~fullBand && ~isempty(previous) && previous.frequency_Hz==ff
+                    pdAll = previous.directAmplitude; peAll = previous.echoAmplitude;
                 else
-                    next.background.referencePulseRange = numbers(bgRef);
+                    [pdAll,peAll] = windowAmplitudes(signal(d,refs),signal(e,pulses),fs,frequencies,dlg);
                 end
+                assert(all(pdAll(:)>0 & isfinite(pdAll(:))),'直达波幅值无效，请检查参考脉冲和直达波窗。');
+                ratios = peAll*r./(pdAll*((L-r)/L));
+                assert(all(isfinite(ratios(:)) & ratios(:)>0),'TS 幅值无效，请检查脉冲与时间窗。');
+                selected = find(frequencies==ff,1);
+                pd = pdAll(selected,:); pe = peAll(selected,:);
+                ratio = ratios(selected,:); ts = 20*log10(ratio);
+                next = struct('folder',folder,'channel',activeChannel,'fs_Hz',fs,'band_kHz',numbers(band), ...
+                    'lfm_kHz',numbers(chirp),'pulseWidth_ms',numbers(width),'frequency_Hz',ff, ...
+                    'pulse',pulses,'referenceMode',mode.Value,'referencePulse',refs, ...
+                    'angle_deg',theta,'angleLimits_deg',angles,'directSamples',d([1 end]),'echoSamples',e([1 end]), ...
+                    'direct_ms',numbers(direct),'echo_ms',numbers(echo(w,:)),'L_m',L,'r_m',r, ...
+                    'directAmplitude',pd,'echoAmplitude',pe,'TS_dB',ts, ...
+                    'energyMean_dB',10*log10(angleMeanPower(theta,ratio.^2)),'peakToPeak_dB',max(ts)-min(ts));
+                if fullBand
+                    [~,rows] = ismember(gridHz,frequencies);
+                    next.spectrum = summarizeSpectrum(theta,gridHz,ratios(rows,:));
+                    next.spectrum.directAmplitude = pdAll(rows,:);
+                    next.spectrum.echoAmplitude = peAll(rows,:);
+                    if numel(theta)>1 && abs(abs(theta(end)-theta(1))-360)<1e-8 && strcmp(mode.Value,'逐脉冲直达波参考')
+                        diameter = 4*10^(next.spectrum.mean_dB/20);
+                        next.spectrum.equivalentDiameter_m = diameter;
+                        next.spectrum.kaRange = pi*gridHz([1 end])'*diameter/1500;
+                    end
+                elseif isfield(previous,'spectrum')
+                    next.spectrum = previous.spectrum;
+                end
+                next.colorScale = scaleSettings;
+                next.signalSource = signalSource;
+                if ~isempty(clean)
+                    next.background = struct('method',bgMode.Value,'pulseRange',cleanPulses,'window_ms',numbers(bgWindow));
+                    if strcmp(bgMode.Value,'脉冲维高通')
+                        next.background.cutoff_cyclesPerPulse = numbers(cutoff);
+                    else
+                        next.background.referencePulseRange = numbers(bgRef);
+                    end
+                end
+                next.processingMode = pageName; next.echoIndex = w;
+                computed{w} = next;
             end
-            result = next;
+            if bistatic
+                if fullBand || isempty(combined)
+                    newCombined = combineEchoWindows(signal,d,refs,windows,pulses,fs,frequencies,L,r,dlg);
+                elseif any(combined.frequency_Hz==ff)
+                    newCombined = combined;
+                else
+                    newCombined = combineEchoWindows(signal,d,refs,windows,pulses,fs,ff,L,r,dlg);
+                    if isfield(computed{1},'spectrum')
+                        gridOnly = selectCombination(combined,computed{1}.spectrum.frequency_Hz);
+                        newCombined.frequency_Hz = [gridOnly.frequency_Hz; ff];
+                        newCombined.coherent_dB = [gridOnly.coherent_dB; newCombined.coherent_dB];
+                        newCombined.incoherent_dB = [gridOnly.incoherent_dB; newCombined.incoherent_dB];
+                    end
+                end
+                newCombined.angle_deg = theta; newCombined.pulse = pulses;
+                newCombined.selectedFrequency_Hz = ff;
+                checkCancel(dlg);
+                combined = newCombined;
+                selectedEcho = min(echoSelect.Value,numel(computed));
+                echoSelect.ItemsData = [];
+                echoSelect.Items = cellstr(compose('回波 %d',1:numel(computed)));
+                echoSelect.ItemsData = 1:numel(computed); echoSelect.Value = selectedEcho;
+                echoSelect.Enable = 'on'; echoResults = computed;
+                result = computed{selectedEcho};
+            else
+                checkCancel(dlg);
+                result = computed{1};
+            end
             if isfield(result,'spectrum')
                 figureChoice.Items = figureNames;
                 bundle.Enable = 'on';
@@ -740,10 +911,15 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 bundle.Enable = 'off';
             end
             if fullBand, figureChoice.Value = figureNames{5}; else, figureChoice.Value = figureNames{1}; end
+            if bistatic
+                figureChoice.Items = [figureChoice.Items(:).' {compareName}];
+                figureChoice.Value = compareName;
+            end
             showResult(); saveButton.Enable = 'on'; plotButton.Enable = 'on';
             tabs.SelectedTab = resultTab; status.Text = ['计算完成 · TS 数据来源：' signalSource];
         catch err
             if ~fullBand && ~isempty(result), freq.Value = result.frequency_Hz/1000; end
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'无法计算 TS');
         end
     end
@@ -761,6 +937,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         configurePreview(curve);
         resultScale.row.Visible = 'off';
         resultLayout.RowHeight = {40,'1x',0,0,54};
+        if bistatic
+            echoSelect.Enable = matlab.lang.OnOffSwitchState(~strcmp(figureChoice.Value,compareName));
+            if strcmp(figureChoice.Value,compareName)
+                stats.Text = sprintf('%g kHz · %d 条回波窗 · 固定直达波参考脉冲 %d', ...
+                    result.frequency_Hz/1000,numel(echoResults),result.referencePulse);
+                return
+            end
+        end
         if any(strcmp(figureChoice.Value,figureNames([2 5])))
             resultLayout.RowHeight = {40,'1x',36,20,54};
             resultScale.row.Visible = 'on';
@@ -787,8 +971,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         info = '';
         cla(ax,'reset'); legend(ax,'off'); colorbar(ax,'off');
         theta = result.angle_deg; xtext = '角度 / °'; ytext = 'TS / dB';
+        if bistatic, xtext = '接收方位角 / °'; end
         if isfield(result,'spectrum'), sp = result.spectrum; f = sp.frequency_Hz/1000; end
         switch kind
+            case compareName
+                row = combined.frequency_Hz==result.frequency_Hz;
+                plot(ax,theta,combined.coherent_dB(row,:),'-','LineWidth',1.3);
+                hold(ax,'on'); plot(ax,theta,combined.incoherent_dB(row,:),'--','LineWidth',1.3); hold(ax,'off');
+                legend(ax,{'相干合成','非相干强度和'},'Location','southoutside','NumColumns',2);
             case figureNames{1}
                 plot(ax,theta,result.TS_dB,'-','LineWidth',1.2);
             case figureNames{2}
@@ -813,7 +1003,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 plot(ax,f,sp.angleMean_dB,'-','LineWidth',1.2); xtext = '频率 / kHz';
         end
         xlabel(ax,xtext); ylabel(ax,ytext);
-        if any(strcmp(kind,figureNames([1 2 3 5 6])))
+        if strcmp(kind,compareName) || any(strcmp(kind,figureNames([1 2 3 5 6])))
             bounds = result.angleLimits_deg;
             if bounds(1)==bounds(2)
                 % 单一角度需要非零显示跨度，只标出实际角度。
@@ -882,21 +1072,52 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         if isequal(parent,0), return; end
         [~,id] = fileparts(folder);
         dest = fullfile(parent,[id '_' result.channel '_TS_' char(datetime('now','Format','yyyyMMdd_HHmmss_SSS'))]);
-        dlg = uiprogressdlg(fig,'Title','导出图表与数据','Message','准备导出');
+        dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title','导出图表与数据','Message','准备导出');
         cleanup = onCleanup(@() close(dlg));
         try
             assert(~isfolder(dest),'结果目录已存在，请再次导出。');
             [ok,msg] = mkdir(dest); assert(ok,'%s',msg);
-            save(fullfile(dest,'TS_results.mat'),'result');
-            writeTables(dest,result);
-            for j = 1:numel(figureNames)
-                base = fullfile(dest,sprintf('%02d_%s',j-1,figureNames{j}));
-                exportFigurePair(figureNames{j},base);
-                dlg.Value = j/numel(figureNames);
+            checkCancel(dlg);
+            saveResultsTo(fullfile(dest,'TS_results.mat'));
+            if bistatic
+                exportFigurePair(compareName,fullfile(dest,compareName));
+                [hz,index] = ndgrid(combined.frequency_Hz,1:numel(combined.pulse));
+                p = combined.pulse(index(:)); a = combined.angle_deg(index(:));
+                writetable(table(hz(:),p(:),a(:),combined.coherent_dB(:),combined.incoherent_dB(:), ...
+                    'VariableNames',{'Frequency_Hz','Pulse','Angle_deg','CoherentTS_dB','IncoherentTS_dB'}), ...
+                    fullfile(dest,'TS_combined.csv'));
+            end
+            originalResult = result;
+            restore = onCleanup(@() restoreResult(originalResult));
+            batch = {result}; if bistatic, batch = echoResults; end
+            for w=1:numel(batch)
+                result = batch{w}; targetDir = dest;
+                if bistatic
+                    targetDir = fullfile(dest,sprintf('回波_%02d',w)); mkdir(targetDir);
+                end
+                writeTables(targetDir,result);
+                for j = 1:numel(figureNames)
+                    base = fullfile(targetDir,sprintf('%02d_%s',j-1,figureNames{j}));
+                    checkCancel(dlg);
+                    exportFigurePair(figureNames{j},base);
+                    dlg.Value = ((w-1)*numel(figureNames)+j)/(numel(figureNames)*numel(batch));
+                end
             end
             status.Text = ['已导出至 ' dest];
         catch err
+            if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = ['已停止导出，已写入的文件在 ' dest]; return; end
             uialert(fig,sprintf('导出未完成。目录：%s\n%s',dest,err.message),'导出失败');
+        end
+    end
+    function restoreResult(saved)
+        result = saved;
+    end
+    function saveResultsTo(path)
+        if bistatic
+            for w=1:numel(echoResults), echoResults{w}.colorScale = scaleSettings; end
+            save(path,'result','echoResults','combined');
+        else
+            save(path,'result');
         end
     end
     function saveResult(varargin)
@@ -906,7 +1127,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         [name,path] = uiputfile('*.mat','保存当前参数与 TS 结果',[id '_' result.channel '_TS.mat']);
         if isequal(name,0), return; end
         try
-            save(fullfile(path,name),'result'); status.Text = ['已保存 ' name];
+            saveResultsTo(fullfile(path,name)); status.Text = ['已保存 ' name];
         catch err
             uialert(fig,err.message,'保存失败');
         end
@@ -926,7 +1147,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         end
         captureDraggedScale();
         [~,id] = fileparts(folder);
-        [name,path] = uiputfile('*.png','保存同名 PNG 和 FIG',[id '_' activeChannel '_' kind '.png']);
+        suffix = ''; if bistatic && source==curve && ~strcmp(kind,compareName), suffix = sprintf('_回波%d',result.echoIndex); end
+        [name,path] = uiputfile('*.png','保存同名 PNG 和 FIG',[id '_' activeChannel '_' kind suffix '.png']);
         if isequal(name,0), return; end
         try
             [~,stem] = fileparts(name);
@@ -941,6 +1163,36 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             uialert(fig,err.message,'导出失败');
         end
     end
+end
+
+function checkCancel(dlg)
+% 允许进度框响应点击，在提交结果之前退出并释放本次局部数组。
+drawnow limitrate
+if dlg.CancelRequested, error('cornerTS:Cancelled','已取消。'); end
+end
+
+function c = combineEchoWindows(signal,d,ref,windows,pulses,fs,f,L,r,dlg)
+% 各窗沿原采样时间轴投影到相同频点；统一用同一参考频谱和传播修正。
+f = f(:); phase = -2i*pi*f/fs;
+reference = exp(phase*(d-1))*signal(d,ref);
+tolerance = max(realmin,16*eps(sum(abs(signal(d,ref)))));
+assert(all(isfinite(reference) & abs(reference)>tolerance),'直达波参考频谱在所选频点接近零，无法归一化。');
+total = complex(zeros(numel(f),numel(pulses))); power = zeros(size(total));
+for w=1:numel(windows)
+    checkCancel(dlg);
+    idx = windows{w};
+    component = (exp(phase*(idx-1))*signal(idx,pulses))./reference*(r*L/(L-r));
+    total = total+component;
+    power = power+abs(component).^2;
+end
+c = struct('frequency_Hz',f,'coherent_dB',20*log10(abs(total)),'incoherent_dB',10*log10(power));
+end
+
+function c = selectCombination(c,frequencies)
+[found,rows] = ismember(frequencies,c.frequency_Hz);
+assert(all(found),'合成结果缺少相应频点。');
+c.frequency_Hz = frequencies(:);
+c.coherent_dB = c.coherent_dB(rows,:); c.incoherent_dB = c.incoherent_dB(rows,:);
 end
 
 function formatExportLayout(paper,tiles,ax,widthCM)
@@ -987,7 +1239,7 @@ for pass = 1:3
 end
 end
 
-function filtered = pulseHighpass(block,fc)
+function filtered = pulseHighpass(block,fc,dlg)
 % 沿每行的脉冲序列作偶对称延拓，再施加二阶巴特沃斯形状的零相位幅频响应。
 n = size(block,2);
 bins = 0:2*n-1;
@@ -996,6 +1248,7 @@ gain = zeros(size(f));
 gain(2:end) = 1./sqrt(1+(fc./f(2:end)).^4);
 filtered = zeros(size(block),'like',block);
 for startRow = 1:64:size(block,1)
+    dlg.Value = (startRow-1)/size(block,1); checkCancel(dlg);
     rows = startRow:min(startRow+63,size(block,1));
     data = block(rows,:);
     extended = [data fliplr(data)];
@@ -1010,15 +1263,15 @@ direct = zeros(count,size(d,2)); echo = zeros(count,size(e,2));
 % 块内用 FFT 求线性卷积，再取与原脚本 hilbert(conv(...)) 相同的中央 201 点。
 for k = 1:count
     kernel = sin(2*pi*frequencies(k)*(1:10000)'/fs);
-    direct(k,:) = amplitudes(d,kernel);
-    echo(k,:) = amplitudes(e,kernel);
+    direct(k,:) = amplitudes(d,kernel,dlg);
+    echo(k,:) = amplitudes(e,kernel,dlg);
     dlg.Value = k/count;
     dlg.Message = sprintf('%.2f kHz · %d / %d · %.0f%%',frequencies(k)/1000,k,count,100*k/count);
-    drawnow limitrate nocallbacks
+    checkCancel(dlg);
 end
 end
 
-function p = amplitudes(signals,kernel)
+function p = amplitudes(signals,kernel,dlg)
 n = size(signals,1)+numel(kernel)-1;
 weight = zeros(n,1); weight(1) = 1;
 weight(2:floor((n+1)/2)) = 2;
@@ -1027,6 +1280,7 @@ filterFFT = fft(kernel,n).*weight;
 center = round(n/2)+(-100:100);
 p = zeros(1,size(signals,2));
 for first = 1:32:size(signals,2)
+    checkCancel(dlg);
     cols = first:min(first+31,size(signals,2));
     z = ifft(fft(signals(:,cols),n,1).*filterFFT,[],1);
     p(cols) = mean(abs(z(center,:)),1);
@@ -1178,7 +1432,7 @@ function [smf, smff] = matchedfilter(s,r,fs)
 %                        fs   : the sample frequency
 %                 output:
 %                        smf  : the matchedfilter output
- 
+
 %                 Developed at TNO-FEL
 %                 Author: Ren\'e Laterveer,      30/09/1992
 %                 some minor changes, RL  7/10/1992
