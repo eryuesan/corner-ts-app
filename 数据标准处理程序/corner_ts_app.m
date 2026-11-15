@@ -5,17 +5,40 @@ shell = uigridlayout(home,[5 3],'RowHeight',{'1x',48,65,65,'1x'}, ...
 h = uilabel(shell,'Text','选择数据处理类型','FontSize',22,'HorizontalAlignment','center');
 h.Layout.Row = 2; h.Layout.Column = 2;
 names = {'合置处理','分置处理'}; sessions = gobjects(1,2);
+opening = false;
 for k=1:2
     b = uibutton(shell,'Text',names{k},'FontSize',18,'ButtonPushedFcn',@(~,~) enter(k));
     b.Layout.Row = k+2; b.Layout.Column = 2;
 end
 home.CloseRequestFcn = @finish;
     function enter(index)
-        if ~isgraphics(sessions(index))
-            sessions(index) = processingSession(index==2,@back);
-            sessions(index).CloseRequestFcn = @(src,~) back(src);
+        if opening, return; end
+        opening = true;
+        dlg = [];
+        try
+            dlg = uiprogressdlg(home,'Title',['正在打开' names{index}], ...
+                'Message','正在加载界面，请稍候…','Indeterminate','on');
+            cleanup = onCleanup(@() finishOpening(dlg));
+            drawnow; % 先显示提示，再创建控件较多的处理界面。
+            if ~isgraphics(home), return; end
+            if ~isgraphics(sessions(index))
+                sessions(index) = processingSession(index==2,@back);
+                sessions(index).CloseRequestFcn = @(src,~) back(src);
+            end
+            sessions(index).Visible = 'on';
+            drawnow;
+            if isgraphics(home), home.Visible = 'off'; end
+        catch err
+            finishOpening(dlg);
+            if isgraphics(home)
+                home.Visible = 'on';
+                uialert(home,err.message,'界面加载失败');
+            end
         end
-        sessions(index).Visible = 'on'; home.Visible = 'off';
+    end
+    function finishOpening(dlg)
+        if ~isempty(dlg) && isvalid(dlg), close(dlg); end
+        opening = false;
     end
     function back(page)
         home.Visible = 'on'; page.Visible = 'off';
@@ -37,9 +60,11 @@ scaleSettings = struct('wave',struct('mode','自动','limits',[]), ...
 pickStart = []; gateLines = gobjects(0);
 
 pageName = '合置处理'; if bistatic, pageName = '分置处理'; end
-fig = uifigure('Name',['角反射体试验 · ' pageName],'WindowState','maximized');
+fig = uifigure('Name',['角反射体试验 · ' pageName],'WindowState','maximized','Visible','off');
 echoResults = {}; editor = []; echoSelect = [];
-combined = []; compareName = '多窗相干与非相干 TS';
+combined = [];
+combinedNames = {'多窗频带能量平均 TS 对比','多窗相干频带能量平均 TS','多窗非相干频带能量平均 TS', ...
+    '多窗相干角度能量平均 TS–频率曲线','多窗非相干角度能量平均 TS–频率曲线'};
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
@@ -155,7 +180,8 @@ pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选扫描范围','
 if bistatic
     view.Items = view.Items(1:3); syncPick();
 end
-uibutton(bar,'Text','显示整组波形图','ButtonPushedFcn',@drawMap, ...
+uibutton(bar,'Text','显示整组波形图','ButtonPushedFcn',@showMapWithProgress, ...
+    'Interruptible','off','BusyAction','cancel', ...
     'BackgroundColor',[0.16 0.36 0.41],'FontColor','white');
 map = uiaxes(waveLayout);
 waveScale = scaleBar(waveLayout);
@@ -618,7 +644,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         elseif isempty(displayed()) && ~strcmp(view.Value,'原始波形')
             view.Value = '原始波形'; status.Text = '请先完成滤波。';
         end
-        drawMap();
+        showMapWithProgress();
     end
     function armPick(varargin)
         pickStart = [];
@@ -633,7 +659,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         elseif strcmp(view.Value,cleanView)
             wanted = cleanView;
         end
-        if ~strcmp(view.Value,wanted), view.Value = wanted; drawMap(); end
+        if ~strcmp(view.Value,wanted), view.Value = wanted; showMapWithProgress(); end
         status.Text = '请点两个边界。热图横轴选脉冲、纵轴选时间；单脉冲图横轴选时间。';
     end
     function values = displayed()
@@ -642,6 +668,23 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             case '带通波形', values = bp;
             case '匹配滤波', values = mf;
             otherwise, values = raw;
+        end
+    end
+    function showMapWithProgress(varargin)
+        if isempty(displayed())
+            status.Text = '请先读取数据或完成所选滤波。';
+            return
+        end
+        dlg = uiprogressdlg(fig,'Title','显示整组波形图', ...
+            'Message',['正在生成' view.Value '，请稍候…'],'Indeterminate','on');
+        cleanup = onCleanup(@() close(dlg));
+        try
+            drawnow; % 在幅值转换、色阶计算与整组热图绘制前显示提示。
+            drawMap();
+            drawnow; % 等待图像更新后再关闭提示。
+        catch err
+            clear cleanup
+            uialert(fig,err.message,'波形图显示失败');
         end
     end
     function drawMap(varargin)
@@ -764,7 +807,6 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 combined = selectCombination(combined,result.frequency_Hz);
             end
             items = figureNames(1:2);
-            if bistatic, items{end+1} = compareName; end
             figureChoice.Items = items; figureChoice.Value = figureNames{1};
             bundle.Enable = 'off'; showResult();
         end
@@ -911,9 +953,9 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 bundle.Enable = 'off';
             end
             if fullBand, figureChoice.Value = figureNames{5}; else, figureChoice.Value = figureNames{1}; end
-            if bistatic
-                figureChoice.Items = [figureChoice.Items(:).' {compareName}];
-                figureChoice.Value = compareName;
+            if bistatic && isfield(result,'spectrum')
+                figureChoice.Items = [figureChoice.Items(:).' combinedNames];
+                if fullBand, figureChoice.Value = combinedNames{1}; end
             end
             showResult(); saveButton.Enable = 'on'; plotButton.Enable = 'on';
             tabs.SelectedTab = resultTab; status.Text = ['计算完成 · TS 数据来源：' signalSource];
@@ -938,10 +980,16 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         resultScale.row.Visible = 'off';
         resultLayout.RowHeight = {40,'1x',0,0,54};
         if bistatic
-            echoSelect.Enable = matlab.lang.OnOffSwitchState(~strcmp(figureChoice.Value,compareName));
-            if strcmp(figureChoice.Value,compareName)
-                stats.Text = sprintf('%g kHz · %d 条回波窗 · 固定直达波参考脉冲 %d', ...
-                    result.frequency_Hz/1000,numel(echoResults),result.referencePulse);
+            echoSelect.Enable = matlab.lang.OnOffSwitchState(~any(strcmp(figureChoice.Value,combinedNames)));
+            if any(strcmp(figureChoice.Value,combinedNames))
+                if any(strcmp(figureChoice.Value,combinedNames(1:3)))
+                    f = result.spectrum.frequency_Hz;
+                    stats.Text = sprintf('%g–%g kHz · %d 个扫频点的线性能量平均 · %d 条回波窗', ...
+                        f(1)/1000,f(end)/1000,numel(f),numel(echoResults));
+                else
+                    stats.Text = sprintf('%g°–%g° · 扫描角度范围内的线性能量平均 · %d 条回波窗', ...
+                        result.angle_deg(1),result.angle_deg(end),numel(echoResults));
+                end
                 return
             end
         end
@@ -974,11 +1022,26 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         if bistatic, xtext = '接收方位角 / °'; end
         if isfield(result,'spectrum'), sp = result.spectrum; f = sp.frequency_Hz/1000; end
         switch kind
-            case compareName
-                row = combined.frequency_Hz==result.frequency_Hz;
-                plot(ax,theta,combined.coherent_dB(row,:),'-','LineWidth',1.3);
-                hold(ax,'on'); plot(ax,theta,combined.incoherent_dB(row,:),'--','LineWidth',1.3); hold(ax,'off');
-                legend(ax,{'相干合成','非相干强度和'},'Location','southoutside','NumColumns',2);
+            case combinedNames
+                which = find(strcmp(kind,combinedNames),1);
+                if which<=3
+                    [coherent,incoherent] = combinedBandMean();
+                    info = '各频点先分别合成，再对扫频网格的线性强度求平均；不跨频点相干相加。';
+                    x = theta;
+                else
+                    [coherent,incoherent] = combinedAngleMean();
+                    x = f; xtext = '频率 / kHz';
+                    info = '各频点分别对扫描角度范围的线性强度作角度积分平均，再转换为 dB。';
+                end
+                if which==1
+                    plot(ax,x,coherent,'-','LineWidth',1.3);
+                    hold(ax,'on'); plot(ax,x,incoherent,'--','LineWidth',1.3); hold(ax,'off');
+                    legend(ax,{'相干合成','非相干强度和'},'Location','southoutside','NumColumns',2);
+                elseif any(which==[2 4])
+                    plot(ax,x,coherent,'-','LineWidth',1.3);
+                else
+                    plot(ax,x,incoherent,'-','LineWidth',1.3);
+                end
             case figureNames{1}
                 plot(ax,theta,result.TS_dB,'-','LineWidth',1.2);
             case figureNames{2}
@@ -1003,7 +1066,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 plot(ax,f,sp.angleMean_dB,'-','LineWidth',1.2); xtext = '频率 / kHz';
         end
         xlabel(ax,xtext); ylabel(ax,ytext);
-        if strcmp(kind,compareName) || any(strcmp(kind,figureNames([1 2 3 5 6])))
+        if any(strcmp(kind,combinedNames(4:5)))
+            xlim(ax,[f(1) f(end)]);
+        end
+        if any(strcmp(kind,combinedNames(1:3))) || any(strcmp(kind,figureNames([1 2 3 5 6])))
             bounds = result.angleLimits_deg;
             if bounds(1)==bounds(2)
                 % 单一角度需要非零显示跨度，只标出实际角度。
@@ -1015,6 +1081,17 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
         end
         if ~any(strcmp(kind,figureNames([2 5]))), grid(ax,'on'); end
+    end
+    function [coherent,incoherent] = combinedBandMean()
+        % 只使用扫频网格；额外计算的当前单频点不参与平均。
+        c = selectCombination(combined,result.spectrum.frequency_Hz);
+        coherent = 10*log10(mean(10.^(c.coherent_dB/10),1));
+        incoherent = 10*log10(mean(10.^(c.incoherent_dB/10),1));
+    end
+    function [coherent,incoherent] = combinedAngleMean()
+        c = selectCombination(combined,result.spectrum.frequency_Hz);
+        coherent = 10*log10(angleMeanPower(result.angle_deg,10.^(c.coherent_dB/10)));
+        incoherent = 10*log10(angleMeanPower(result.angle_deg,10.^(c.incoherent_dB/10)));
     end
     function configurePreview(source)
         stylePreviewAxes(source);
@@ -1080,7 +1157,18 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             checkCancel(dlg);
             saveResultsTo(fullfile(dest,'TS_results.mat'));
             if bistatic
-                exportFigurePair(compareName,fullfile(dest,compareName));
+                for j=1:numel(combinedNames)
+                    checkCancel(dlg);
+                    exportFigurePair(combinedNames{j},fullfile(dest,combinedNames{j}));
+                end
+                [coherent,incoherent] = combinedBandMean();
+                writetable(table(combined.pulse(:),combined.angle_deg(:),coherent(:),incoherent(:), ...
+                    'VariableNames',{'Pulse','Angle_deg','CoherentBandMeanTS_dB','IncoherentBandMeanTS_dB'}), ...
+                    fullfile(dest,'TS_combined_band_mean.csv'));
+                [coherent,incoherent] = combinedAngleMean();
+                writetable(table(result.spectrum.frequency_Hz(:),coherent(:),incoherent(:), ...
+                    'VariableNames',{'Frequency_Hz','CoherentAngleMeanTS_dB','IncoherentAngleMeanTS_dB'}), ...
+                    fullfile(dest,'TS_combined_angle_mean.csv'));
                 [hz,index] = ndgrid(combined.frequency_Hz,1:numel(combined.pulse));
                 p = combined.pulse(index(:)); a = combined.angle_deg(index(:));
                 writetable(table(hz(:),p(:),a(:),combined.coherent_dB(:),combined.incoherent_dB(:), ...
@@ -1147,7 +1235,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         end
         captureDraggedScale();
         [~,id] = fileparts(folder);
-        suffix = ''; if bistatic && source==curve && ~strcmp(kind,compareName), suffix = sprintf('_回波%d',result.echoIndex); end
+        suffix = ''; if bistatic && source==curve && ~any(strcmp(kind,combinedNames)), suffix = sprintf('_回波%d',result.echoIndex); end
         [name,path] = uiputfile('*.png','保存同名 PNG 和 FIG',[id '_' activeChannel '_' kind suffix '.png']);
         if isequal(name,0), return; end
         try
@@ -1157,9 +1245,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                     '导出结果图','Options',{'替换','取消'},'DefaultOption',2,'CancelOption',2);
                 if ~strcmp(choice,'替换'), return; end
             end
+            dlg = uiprogressdlg(fig,'Title','导出当前图', ...
+                'Message','正在调整排版并保存 PNG 和 FIG，请稍候…','Indeterminate','on');
+            cleanup = onCleanup(@() close(dlg));
+            drawnow;
             exportFigurePair(kind,fullfile(path,stem),source);
             status.Text = ['已保存 ' stem '.png 和同名 FIG'];
         catch err
+            clear cleanup
             uialert(fig,err.message,'导出失败');
         end
     end
