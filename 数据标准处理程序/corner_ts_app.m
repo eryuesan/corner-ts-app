@@ -53,6 +53,7 @@ function fig = processingSession(bistatic,goHome)
 project = fileparts(fileparts(mfilename('fullpath')));
 raw = []; bp = []; mf = []; fs = []; folder = ''; result = [];
 activeChannel = '';
+dataOrigin = ''; timeSeconds = []; recordNumbers = []; recordFiles = {};
 clean = []; cleanPulses = []; cleanView = '脉冲维去背景';
 backgroundPending = false;
 scaleSettings = struct('wave',struct('mode','自动','limits',[]), ...
@@ -64,7 +65,8 @@ fig = uifigure('Name',['角反射体试验 · ' pageName],'WindowState','maximiz
 echoResults = {}; editor = []; echoSelect = [];
 combined = [];
 combinedNames = {'多窗频带能量平均 TS 对比','多窗相干频带能量平均 TS','多窗非相干频带能量平均 TS', ...
-    '多窗相干角度能量平均 TS–频率曲线','多窗非相干角度能量平均 TS–频率曲线'};
+    '多窗相干角度能量平均 TS–频率曲线','多窗非相干角度能量平均 TS–频率曲线', ...
+    '多窗相干 TS 频率–角度谱','多窗非相干 TS 频率–角度谱'};
 layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
@@ -74,25 +76,43 @@ form = uigridlayout(sidebar,[32 3],'ColumnWidth',{132,'1x','1x'}, ...
     'RowHeight',rowHeights,'RowSpacing',4,'ColumnSpacing',6,'Padding',[6 4 8 4], ...
     'BackgroundColor',[0.98 0.985 0.99],'Scrollable','on');
 
-sectionHeading(1,'数据与通道');
+sourceBar = uigridlayout(form,[1 3],'ColumnWidth',{'1x',58,70},'Padding',[0 0 0 0]);
+wide(sourceBar,1);
+uilabel(sourceBar,'Text','数据与通道','FontWeight','bold');
+uilabel(sourceBar,'Text','数据来源');
+sourceMenu = uidropdown(sourceBar,'Items',{'NI','LTT'},'Value','NI', ...
+    'Tag','dataSource','ValueChangedFcn',@sourceChanged);
 folderButton = uibutton(form,'Text','选择采集文件夹','ButtonPushedFcn',@loadFolder);
 folderButton.Layout.Row = 2; folderButton.Layout.Column = [1 2];
 channelMenu = uidropdown(form,'Items',{'通道'},'Enable','off','Tooltip','切换要读取和处理的通道', ...
-    'ValueChangedFcn',@changeChannel);
+    'Tag','dataChannel','ValueChangedFcn',@changeChannel);
 channelMenu.Layout.Row = 2; channelMenu.Layout.Column = 3;
 recordLabel = uilabel(form,'Text','尚未加载数据'); wide(recordLabel,3);
 
-sectionHeading(4,'信号与滤波');
+signalBar = uigridlayout(form,[1 3],'ColumnWidth',{'1x',58,70},'Padding',[0 0 0 0]);
+wide(signalBar,4);
+uilabel(signalBar,'Text','信号与滤波','FontWeight','bold');
+uilabel(signalBar,'Text','信号类型');
+signalType = uidropdown(signalBar,'Items',{'LFM','CW'},'Value','LFM', ...
+    'Tag','signalType','ValueChangedFcn',@signalChanged);
 band = fields(5,'带通频带 / kHz',[15 45],@filterChanged);
-chirp = fields(6,'LFM 起止 / kHz',[20 40],@filterChanged);
-width = fields(7,'LFM 脉宽 / ms',0.1,@filterChanged);
+signalLabel = uilabel(form,'Text','LFM 起止 / kHz'); signalLabel.Layout.Row = 6; signalLabel.Layout.Column = 1;
+chirp = gobjects(1,2);
+for signalFieldIndex=1:2
+    chirp(signalFieldIndex) = uieditfield(form,'numeric','Value',20*signalFieldIndex,'ValueChangedFcn',@filterChanged);
+    chirp(signalFieldIndex).Layout.Row = 6; chirp(signalFieldIndex).Layout.Column = signalFieldIndex+1;
+end
+cwFrequency = uieditfield(form,'numeric','Value',30,'Visible','off', ...
+    'Tag','cwFrequency','ValueChangedFcn',@filterChanged);
+cwFrequency.Layout.Row = 6; cwFrequency.Layout.Column = [2 3];
+width = fields(7,'信号脉宽 / ms',0.1,@filterChanged);
 bpButton = uibutton(form,'Text','带通滤波','ButtonPushedFcn',@filterData);
 bpButton.Layout.Row = 8; bpButton.Layout.Column = 1;
 mfButton = uibutton(form,'Text','匹配滤波','ButtonPushedFcn',@filterData);
 mfButton.Layout.Row = 8; mfButton.Layout.Column = [2 3];
 
-if bistatic, sectionHeading(9,'扫描脉冲'); else, sectionHeading(9,'固定横带背景抑制'); end
-scan = fields(10,'扫描脉冲（首 / 末）',[1 1],@gateChanged);
+if bistatic, sectionHeading(9,'脉冲范围'); else, sectionHeading(9,'固定横带背景抑制'); end
+scan = fields(10,'处理脉冲（首 / 末）',[1 1],@gateChanged);
 set(scan,'Tooltip','背景抑制与 TS 共用此范围；首末角度对应这两个脉冲。');
 bgWindow = []; bgRef = []; bgButton = [];
 if ~bistatic
@@ -109,7 +129,10 @@ else
     set(scan,'Tooltip','按接收方位顺序选择首、末脉冲');
     form.RowHeight(11:15) = repmat({0},1,5);
 end
-sectionHeading(16,'扫描范围与时间窗');
+axisBar = uigridlayout(form,[1 2],'ColumnWidth',{'1x',144},'Padding',[0 0 0 0]);
+wide(axisBar,16); uilabel(axisBar,'Text','采集方式与时间窗','FontWeight','bold');
+axisMode = uidropdown(axisBar,'Items',{'角度扫描','固定方位重复采集'}, ...
+    'ValueChangedFcn',@axisModeChanged,'Tag','acquisitionMode');
 angle = fields(17,'首末角度 / °',[0 360],@invalidate);
 direct = fields(18,'直达波窗 / ms',[0 0],@gateChanged);
 if bistatic
@@ -133,7 +156,11 @@ if bistatic
     ref.Tooltip = '使用共线位置（发射阵—水听器—目标）的参考脉冲，参考距离 L−r';
 end
 
-sectionHeading(24,'目标强度计算');
+tsBar = uigridlayout(form,[1 2],'ColumnWidth',{'1x',105},'Padding',[0 0 0 0]);
+wide(tsBar,24);
+uilabel(tsBar,'Text','目标强度计算','FontWeight','bold');
+tsScope = uidropdown(tsBar,'Items',{'单频点','扫频范围'},'Value','扫频范围', ...
+    'Tooltip','选择 TS 计算范围','ValueChangedFcn',@scopeChanged);
 freq = fields(25,'TS 频点 / kHz',30,@frequencyChanged);
 sweepBand = fields(26,'扫频范围 / kHz',[20 40],@sweepChanged);
 step = fields(27,'扫频间隔 / kHz',0.2,@sweepChanged);
@@ -175,7 +202,7 @@ bar = uigridlayout(waveLayout,[1 6],'ColumnWidth',{36,106,36,150,122,'1x'}, ...
 uilabel(bar,'Text','波形','FontWeight','bold','FontColor',ink);
 view = uidropdown(bar,'Items',{'原始波形','带通波形','匹配滤波',cleanView},'ValueChangedFcn',@changeView);
 uilabel(bar,'Text','选窗','FontWeight','bold','FontColor',ink);
-pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗','点两次选回波窗','点两次选背景窗'}, ...
+pick = uidropdown(bar,'Items',{'点击查看脉冲','点两次选脉冲范围','点两次选直达波窗','点两次选回波窗','点两次选背景窗'}, ...
     'ValueChangedFcn',@armPick);
 if bistatic
     view.Items = view.Items(1:3); syncPick();
@@ -196,6 +223,7 @@ resultLayout = uigridlayout(resultTab,[5 1],'RowHeight',{40,'1x',0,0,54}, ...
     'Padding',[12 10 12 10],'RowSpacing',4,'BackgroundColor','white');
 figureNames = {'单频 TS','回波时间–角度图','多频点 TS–角度曲线','多角度 TS–频率曲线', ...
     'TS 频率–角度谱','频带能量平均 TS–角度曲线','角度能量平均 TS–频率曲线'};
+scanNames = figureNames; scanCombinedNames = combinedNames;
 resultBar = uigridlayout(resultLayout,[1 3],'ColumnWidth',{52,230,'1x'}, ...
     'Padding',[8 4 8 4],'ColumnSpacing',6,'BackgroundColor',barColor);
 uilabel(resultBar,'Text','结果图','FontWeight','bold','FontColor',ink);
@@ -247,7 +275,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         plus.Layout.Row=n+1; plus.Layout.Column=[1 4];
     end
     function syncPick()
-        pickStart = []; pick.Items = [{'点击查看脉冲','点两次选扫描范围','点两次选直达波窗'}, ...
+        pickStart = []; pick.Items = [{'点击查看脉冲','点两次选脉冲范围','点两次选直达波窗'}, ...
             reshape(cellstr(compose('点两次选回波窗 %d',1:size(echo,1))),1,[])];
         pick.Value=pick.Items{1};
     end
@@ -321,7 +349,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             controls = waveScale; group = 'wave'; ax = map;
         else
             controls = resultScale; ax = curve;
-            if strcmp(figureChoice.Value,figureNames{5}), group = 'ts'; else, group = 'wave'; end
+            if any(strcmp(figureChoice.Value,[figureNames(5) combinedNames(6:7)])), group = 'ts'; else, group = 'wave'; end
         end
         setting = scaleSettings.(group);
         if manual
@@ -354,7 +382,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
             syncScale(waveScale,map,setting,'波形色阶');
         end
-        if ~isempty(result) && any(strcmp(figureChoice.Value,figureNames([2 5])))
+        if ~isempty(result) && any(strcmp(figureChoice.Value,[figureNames([2 5]) combinedNames(6:7)]))
             showResult();
         end
     end
@@ -422,7 +450,48 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         ref.Enable = matlab.lang.OnOffSwitchState(strcmp(mode.Value,'固定脉冲直达波参考'));
         invalidate();
     end
+    function axisModeChanged(varargin)
+        repeated = strcmp(axisMode.Value,'固定方位重复采集');
+        set(angle,'Enable',matlab.lang.OnOffSwitchState(~repeated));
+        figureNames = scanNames; combinedNames = scanCombinedNames;
+        if repeated
+            figureNames = strrep(scanNames,'角度','脉冲');
+            combinedNames = strrep(scanCombinedNames,'角度','脉冲');
+            set(scan,'Tooltip','填写要处理的首末采集列号，从 1 开始。');
+        else
+            set(scan,'Tooltip','首末脉冲分别对应扫描首末角度。');
+        end
+        invalidate();
+    end
+    function signalChanged(src,event)
+        isCW = strcmp(signalType.Value,'CW');
+        cwFrequency.Visible = matlab.lang.OnOffSwitchState(isCW);
+        set(chirp,'Visible',matlab.lang.OnOffSwitchState(~isCW));
+        if isCW, signalLabel.Text = 'CW 频率 / kHz'; else, signalLabel.Text = 'LFM 起止 / kHz'; end
+        if isCW
+            tsScope.Value = '单频点'; freq.Value = cwFrequency.Value;
+        else
+            tsScope.Value = '扫频范围';
+        end
+        scopeChanged();
+        filterChanged(src,event);
+        status.Text = ['已切换为 ' signalType.Value '，请核对信号频率、脉宽和带通频带，重新进行匹配滤波。'];
+    end
+    function res = stampSignal(res)
+        res.signalType = signalType.Value;
+        res.pulseWidth_ms = numbers(width);
+        res.cwFrequency_kHz = []; res.lfm_kHz = [];
+        if strcmp(signalType.Value,'CW')
+            res.cwFrequency_kHz = cwFrequency.Value;
+        else
+            res.lfm_kHz = numbers(chirp);
+        end
+    end
     function filterChanged(src,~)
+        if isequal(src,cwFrequency) && strcmp(tsScope.Value,'单频点') && strcmp(signalType.Value,'CW')
+            freq.Value = cwFrequency.Value;
+            invalidate();
+        end
         if any(src==band)
             backgroundPending = backgroundPending || ~isempty(clean);
             clean = []; cleanPulses = []; if ~bistatic, bgButton.Enable = 'off'; end
@@ -431,7 +500,8 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         else
             mf = []; staleView = '匹配滤波';
             if ~isempty(result)
-                result.lfm_kHz = numbers(chirp); result.pulseWidth_ms = numbers(width);
+                result = stampSignal(result);
+                for j=1:numel(echoResults), echoResults{j} = stampSignal(echoResults{j}); end
             end
         end
         if strcmp(view.Value,staleView)
@@ -499,18 +569,39 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             invalidate();
             resetPick(); view.Value = cleanView; tabs.SelectedTab = waveTab; drawMap();
             status.Text = sprintf('%s · 脉冲 %d–%d · %.4g–%.4g ms', ...
-                description,bounds,(rows([1 end])-1)*1000/fs);
+                description,bounds,timeSeconds(rows([1 end]))*1000);
         catch err
             if strcmp(err.identifier,'cornerTS:Cancelled'), status.Text = '已取消，本次临时数据已丢弃。'; return; end
             uialert(fig,err.message,'固定横带背景抑制');
         end
     end
+    function sourceChanged(varargin)
+        raw = []; bp = []; mf = []; clean = []; cleanPulses = [];
+        fs = []; timeSeconds = []; recordNumbers = []; recordFiles = {};
+        folder = ''; dataOrigin = ''; activeChannel = ''; backgroundPending = false;
+        if ~bistatic, bgButton.Enable = 'off'; end
+        channelMenu.Items = {'通道'}; channelMenu.Enable = 'off';
+        resetPick(); invalidate(); view.Value = '原始波形'; clearMap(); cla(trace);
+        refreshButton.Enable = 'off'; recordLabel.Text = '尚未加载数据';
+        if strcmp(sourceMenu.Value,'LTT')
+            angle(1).Value = 0; angle(2).Value = 0;
+        else
+            angle(1).Value = 0; angle(2).Value = 360;
+        end
+        status.Text = ['已切换到 ' sourceMenu.Value '，请选择一个采集工况文件夹。'];
+    end
     function loadFolder(varargin)
         startDir = fullfile(project,'数据');
         if ~isfolder(startDir), startDir = pwd; end
-        selected = uigetdir(startDir,'选择含 JSON 与 MAT 的采集文件夹');
+        prompt = '选择含 JSON 与 MAT 的 NI 采集文件夹';
+        if strcmp(sourceMenu.Value,'LTT'), prompt = '选择一个 LTT 工况文件夹或其 00000 子目录'; end
+        selected = uigetdir(startDir,prompt);
         if isequal(selected,0), return; end
         try
+            if strcmp(sourceMenu.Value,'LTT')
+                readChannel(selected,'');
+                return
+            end
             [~,id] = fileparts(selected);
             files = dir(fullfile(selected,[id '_*_ai*.mat']));
             pattern = ['^' regexptranslate('escape',id) '_[1-9]\d*_(ai\d+)\.mat$'];
@@ -545,15 +636,27 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     function readChannel(selected,channel)
         dlg = uiprogressdlg(fig,'Cancelable','on','CancelText','取消','Title','读取采集记录','Message','正在读取文件');
         cleanup = onCleanup(@() close(dlg));
+        readTimer = tic;
+        if strcmp(sourceMenu.Value,'LTT')
+            imported = readLTTFolder(selected,channel,dlg);
+            values = imported.values; rate = imported.fs;
+            selected = imported.folder; channel = imported.channel;
+            channels = imported.channels; times = imported.timeSeconds;
+            indices = imported.recordNumbers; filenames = imported.recordFiles;
+            [~,id] = fileparts(selected);
+            if strcmp(id,'00000'), [~,id] = fileparts(fileparts(selected)); end
+            samples = size(values,1); count = size(values,2);
+        else
         [~,id] = fileparts(selected);
         meta = jsondecode(fileread(fullfile(selected,[id '.json'])));
         rate = meta.SampleRate_Hz_; count = meta.CollectTimes;
         samples = round(meta.SingalTime_ms_*rate/1000);
         assert(rate>0 && samples>=2 && count>=1 && count==fix(count),'JSON 采集参数无效。');
-        readTimer = tic;
         values = zeros(samples,count);
+        filenames = cell(1,count);
         for k = 1:count
             name = sprintf('%s_%d_%s.mat',id,k,channel);
+            filenames{k} = name;
             loaded = load(fullfile(selected,name)); names = fieldnames(loaded);
             assert(isscalar(names),'文件 %s 中的信号变量不唯一。',name);
             v = loaded.(names{1});
@@ -562,17 +665,26 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             values(:,k) = double(v(:));
             if mod(k,20)==0, dlg.Value = k/count; checkCancel(dlg); end
         end
+        times = (0:samples-1)'/rate; indices = 1:count;
+        end
         checkCancel(dlg);
         readSeconds = toc(readTimer);
-        sameRecord = strcmp(folder,selected) && isequal(size(raw),size(values)) && isequal(fs,rate);
+        sameRecord = strcmp(dataOrigin,sourceMenu.Value) && strcmp(folder,selected) && ...
+            isequal(size(raw),size(values)) && isequal(timeSeconds,times);
         raw = values; fs = rate; folder = selected; activeChannel = channel; bp = []; mf = [];
+        dataOrigin = sourceMenu.Value; timeSeconds = times;
+        recordNumbers = indices; recordFiles = filenames;
+        if strcmp(dataOrigin,'LTT')
+            channelMenu.Items = channels; channelMenu.Value = channel; channelMenu.Enable = 'on';
+        end
         backgroundPending = false;
         clean = []; cleanPulses = []; if ~bistatic, bgButton.Enable = 'off'; end
         if ~sameRecord
             if ~bistatic, bgRef(1).Value = 1; bgRef(2).Value = count; end
             scan(1).Value = 1; scan(2).Value = count; ref.Value = 1; pulse.Value = 1;
-            for h = [direct reshape(echo,1,[]) bgWindow], h.Value = 0; end
-            if ~bistatic && strcmp(id,'20261031_151830') && count>=833 && samples>=4780
+            for h = [direct reshape(echo,1,[]) bgWindow], h.Value = timeSeconds(1)*1000; end
+            if strcmp(dataOrigin,'LTT'), angle(1).Value = 0; angle(2).Value = 0; end
+            if strcmp(dataOrigin,'NI') && ~bistatic && strcmp(id,'20261031_151830') && count>=833 && samples>=4780
                 scan(1).Value = 112; scan(2).Value = 833;
                 gates = ([1050 2011 3362 4780]-1)*1000/fs;
                 boxes = [direct echo];
@@ -580,10 +692,18 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
         end
         resetPick(); invalidate(); view.Value = '原始波形';
-        recordLabel.Text = sprintf('%s · %s · %d 脉冲 · %g kHz',id,channel,count,rate/1000);
+        recordLabel.Text = sprintf('%s · %s · %d 次 · %g kHz',id,channel,count,rate/1000);
+        recordLabel.Tooltip = sprintf('%s · %d 点/次 · 时间 %.6g 至 %.6g ms', ...
+            dataOrigin,samples,timeSeconds([1 end])*1000);
         refreshButton.Enable = 'on';
         tabs.SelectedTab = waveTab; clearMap(); showTrace();
         status.Text = sprintf('已读取 %s 的 %d 个文件，用时 %.1f 秒。',channel,count,readSeconds);
+        if strcmp(dataOrigin,'LTT')
+            status.Text = [status.Text ' 请按工况选择固定方位或填写扫描角度，并设置频带。'];
+            if imported.missingMetadata>0
+                status.Text = [status.Text sprintf(' %d 个 TXT 缺失，仅按 CSV 校验。',imported.missingMetadata)];
+            end
+        end
     end
     function filterData(src,~)
         isBand = src==bpButton;
@@ -596,10 +716,17 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 b = numbers(band)*1000;
                 assert(b(1)>0 && diff(b)>0 && b(2)<fs/2,'带通频带须递增且在奈奎斯特频率以内。');
             else
-                f = numbers(chirp)*1000; duration = numbers(width)/1000;
-                assert(f(1)>0 && diff(f)>0 && f(2)<fs/2,'LFM 频带须递增且在奈奎斯特频率以内。');
+                duration = numbers(width)/1000;
                 assert(duration*fs>=1 && duration*fs<size(raw,1),'脉宽超出记录范围。');
-                replica = LFM(f(1),f(2),fs,duration);
+                if strcmp(signalType.Value,'CW')
+                    f = cwFrequency.Value*1000;
+                    assert(isfinite(f) && f>0 && f<fs/2,'CW 频率须大于零且小于奈奎斯特频率。');
+                    replica = LFM(f,f,fs,duration); % 零扫频率时退化为同相位约定的单频正弦。
+                else
+                    f = numbers(chirp)*1000;
+                    assert(f(1)>0 && diff(f)>0 && f(2)<fs/2,'LFM 频带须递增且在奈奎斯特频率以内。');
+                    replica = LFM(f(1),f(2),fs,duration);
+                end
             end
             filtered = zeros(size(raw)); lastPct = -1;
             for k = 1:count
@@ -691,14 +818,15 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         captureDraggedScale();
         values = displayed();
         if isempty(values), return; end
-        last = (size(values,1)-1)*1000/fs;
+        times = timeSeconds*1000;
         db = 20*log10(abs(values));
-        im = imagesc(map,[1 size(values,2)],[0 last],db);
+        im = imagesc(map,[1 size(values,2)],times([1 end]),db);
         title(map,''); im.ButtonDownFcn = @mapClick; map.YDir = 'normal'; colormap(map,jet(256));
         waveInfo.Text = applyScale(map,im,scaleSettings.wave,true);
         syncScale(waveScale,map,scaleSettings.wave,'波形色阶');
-        xlim(map,[0.5 size(values,2)+0.5]); ylim(map,[0 last]);
+        xlim(map,[0.5 size(values,2)+0.5]); ylim(map,times([1 end]));
         xlabel(map,'原始脉冲序号'); ylabel(map,'时间 / ms');
+        if strcmp(dataOrigin,'LTT'), xlabel(map,'采集列号（按 M 序号排序）'); end
         configurePreview(map); disableDefaultInteractivity(map);
         drawGates(); showTrace();
     end
@@ -709,7 +837,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             pulse.Value = k; showTrace(); return;
         end
         switch pick.Value
-            case '点两次选扫描范围', target = scan; value = k;
+            case '点两次选脉冲范围', target = scan; value = k;
             case '点两次选直达波窗', target = direct; value = point(2);
             case '点两次选背景窗', target = bgWindow; value = point(2);
             otherwise, target = pickedEcho(); value = point(2);
@@ -726,7 +854,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 if ~startsWith(pick.Value,'点两次选回波窗'), return; end
                 target = pickedEcho();
         end
-        value = max(0,min(event.IntersectionPoint(1),(size(bp,1)-1)*1000/fs));
+        value = max(timeSeconds(1)*1000,min(event.IntersectionPoint(1),timeSeconds(end)*1000));
         setBoundary(target,value);
     end
     function setBoundary(target,value)
@@ -763,10 +891,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     function showTrace(varargin)
         values = displayed(); if isempty(values), return; end
         k = min(size(values,2),max(1,round(pulse.Value))); pulse.Value = k;
-        line = plot(trace,(0:size(values,1)-1)*1000/fs,values(:,k),'Color',[0.12 0.28 0.48]);
+        line = plot(trace,timeSeconds*1000,values(:,k),'Color',[0.12 0.28 0.48]);
         trace.ButtonDownFcn = @traceClick; line.ButtonDownFcn = @traceClick;
         xlabel(trace,'时间 / ms'); ylabel(trace,'幅值');
         title(trace,sprintf('脉冲 %d · %s',k,view.Value)); grid(trace,'on');
+        if strcmp(dataOrigin,'LTT')
+            title(trace,sprintf('采集列 %d · M%04d · %s · %s',k,recordNumbers(k),activeChannel,view.Value));
+            ylabel(trace,'电压 / V');
+        end
         pbaspect(trace,[2 1 1]);
         configurePreview(trace); disableDefaultInteractivity(trace);
         if ismember(view.Value,{'带通波形',cleanView})
@@ -784,9 +916,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         end
     end
     function idx = samplesIn(handles)
-        bounds = numbers(handles); last = (size(bp,1)-1)*1000/fs;
-        assert(bounds(1)>=0 && bounds(2)<=last && diff(bounds)>0,'请设置记录范围内的起止时间窗。');
-        limits = round(bounds*fs/1000)+1;
+        bounds = numbers(handles); times = timeSeconds*1000;
+        assert(bounds(1)>=times(1) && bounds(2)<=times(end) && diff(bounds)>0,'请设置记录范围内的起止时间窗。');
+        limits = round((bounds/1000-timeSeconds(1))*fs)+1;
+        limits = max(1,min(numel(timeSeconds),limits));
         assert(diff(limits)>=1,'窗口至少需要两个采样点。');
         idx = limits(1):limits(2);
     end
@@ -799,6 +932,13 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
     function frequencyChanged(varargin)
         if ~isempty(result), compute(false); end
     end
+    function scopeChanged(varargin)
+        sweepOn = strcmp(tsScope.Value,'扫频范围');
+        enabled = matlab.lang.OnOffSwitchState(sweepOn);
+        set(sweepBand,'Enable',enabled); step.Enable = enabled; sweepButton.Enable = enabled;
+        if ~sweepOn && strcmp(signalType.Value,'CW'), freq.Value = cwFrequency.Value; end
+        invalidate();
+    end
     function sweepChanged(varargin)
         if ~isempty(result) && isfield(result,'spectrum')
             result = rmfield(result,'spectrum');
@@ -808,7 +948,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
             items = figureNames(1:2);
             figureChoice.Items = items; figureChoice.Value = figureNames{1};
-            bundle.Enable = 'off'; showResult();
+            bundle.Enable = 'on'; showResult();
         end
         status.Text = '扫频参数已更新。点击“计算全频段 TS”生成新频谱。';
     end
@@ -819,13 +959,18 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             assert(~isempty(bp),'请先完成滤波。');
             assert(~backgroundPending,'背景抑制参数或输入已改变，请重新应用到扫描脉冲后再计算 TS。');
             [signal,signalSource] = analysisSignal();
-            bounds = numbers(scan); angles = numbers(angle); geometry = numbers(dist);
+            bounds = numbers(scan); geometry = numbers(dist);
             assert(all(bounds==fix(bounds)) && bounds(1)>=1 && diff(bounds)>=0 && ...
-                bounds(2)<=size(bp,2),'扫描范围须为有效的原始脉冲序号。');
+                bounds(2)<=size(bp,2),'处理范围须填写有效的首末脉冲序号。');
             pulses = bounds(1):bounds(2);
-            assert(isscalar(pulses) || diff(angles)~=0,'多个脉冲的扫描起止角度不能相同。');
-            theta = linspace(angles(1),angles(2),numel(pulses));
-            if isscalar(pulses), theta = angles(1); end
+            if strcmp(axisMode.Value,'固定方位重复采集')
+                theta = []; angles = [];
+            else
+                angles = numbers(angle);
+                assert(isscalar(pulses) || diff(angles)~=0,'请填写实际扫描首末角度，或选择固定方位重复采集。');
+                theta = linspace(angles(1),angles(2),numel(pulses));
+                if isscalar(pulses), theta = angles(1); end
+            end
             L = geometry(1); r = geometry(2);
             assert(L>r && r>0,'当前传播修正要求 L > r > 0。');
             d = samplesIn(direct); ff = numbers(freq)*1000;
@@ -884,16 +1029,16 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 selected = find(frequencies==ff,1);
                 pd = pdAll(selected,:); pe = peAll(selected,:);
                 ratio = ratios(selected,:); ts = 20*log10(ratio);
-                next = struct('folder',folder,'channel',activeChannel,'fs_Hz',fs,'band_kHz',numbers(band), ...
-                    'lfm_kHz',numbers(chirp),'pulseWidth_ms',numbers(width),'frequency_Hz',ff, ...
+                next = struct('folder',folder,'channel',activeChannel,'fs_Hz',fs,'band_kHz',b/1000, ...
+                    'frequency_Hz',ff, ...
                     'pulse',pulses,'referenceMode',mode.Value,'referencePulse',refs, ...
                     'angle_deg',theta,'angleLimits_deg',angles,'directSamples',d([1 end]),'echoSamples',e([1 end]), ...
                     'direct_ms',numbers(direct),'echo_ms',numbers(echo(w,:)),'L_m',L,'r_m',r, ...
                     'directAmplitude',pd,'echoAmplitude',pe,'TS_dB',ts, ...
-                    'energyMean_dB',10*log10(angleMeanPower(theta,ratio.^2)),'peakToPeak_dB',max(ts)-min(ts));
+                    'energyMean_dB',10*log10(acquisitionMeanPower(theta,ratio.^2)),'peakToPeak_dB',max(ts)-min(ts));
                 if fullBand
                     [~,rows] = ismember(gridHz,frequencies);
-                    next.spectrum = summarizeSpectrum(theta,gridHz,ratios(rows,:));
+                    next.spectrum = summarizeSpectrum(theta,pulses,gridHz,ratios(rows,:));
                     next.spectrum.directAmplitude = pdAll(rows,:);
                     next.spectrum.echoAmplitude = peAll(rows,:);
                     if numel(theta)>1 && abs(abs(theta(end)-theta(1))-360)<1e-8 && strcmp(mode.Value,'逐脉冲直达波参考')
@@ -904,7 +1049,14 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                 elseif isfield(previous,'spectrum')
                     next.spectrum = previous.spectrum;
                 end
+                next = stampSignal(next);
                 next.colorScale = scaleSettings;
+                next.dataSource = dataOrigin;
+                next.acquisitionMode = axisMode.Value;
+                next.timeOrigin_s = timeSeconds(1);
+                next.time_s = timeSeconds;
+                next.acquisitionNumber = recordNumbers(pulses);
+                next.acquisitionFiles = recordFiles(pulses);
                 next.signalSource = signalSource;
                 if ~isempty(clean)
                     next.background = struct('method',bgMode.Value,'pulseRange',cleanPulses,'window_ms',numbers(bgWindow));
@@ -932,6 +1084,7 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                     end
                 end
                 newCombined.angle_deg = theta; newCombined.pulse = pulses;
+                newCombined.acquisitionMode = axisMode.Value;
                 newCombined.selectedFrequency_Hz = ff;
                 checkCancel(dlg);
                 combined = newCombined;
@@ -947,11 +1100,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             end
             if isfield(result,'spectrum')
                 figureChoice.Items = figureNames;
-                bundle.Enable = 'on';
             else
                 figureChoice.Items = figureNames(1:2);
-                bundle.Enable = 'off';
             end
+            bundle.Enable = 'on';
             if fullBand, figureChoice.Value = figureNames{5}; else, figureChoice.Value = figureNames{1}; end
             if bistatic && isfield(result,'spectrum')
                 figureChoice.Items = [figureChoice.Items(:).' combinedNames];
@@ -986,9 +1138,23 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                     f = result.spectrum.frequency_Hz;
                     stats.Text = sprintf('%g–%g kHz · %d 个扫频点的线性能量平均 · %d 条回波窗', ...
                         f(1)/1000,f(end)/1000,numel(f),numel(echoResults));
+                elseif any(strcmp(figureChoice.Value,combinedNames(4:5)))
+                    if isempty(result.angle_deg)
+                        stats.Text = sprintf('脉冲 %d–%d · %d 次采集的线性能量平均 · %d 条回波窗', ...
+                            result.pulse(1),result.pulse(end),numel(result.pulse),numel(echoResults));
+                    else
+                        stats.Text = sprintf('%g°–%g° · 扫描角度范围内的线性能量平均 · %d 条回波窗', ...
+                            result.angle_deg(1),result.angle_deg(end),numel(echoResults));
+                    end
                 else
-                    stats.Text = sprintf('%g°–%g° · 扫描角度范围内的线性能量平均 · %d 条回波窗', ...
-                        result.angle_deg(1),result.angle_deg(end),numel(echoResults));
+                    f = result.spectrum.frequency_Hz;
+                    axisUnit = '个角度';
+                    if isempty(result.angle_deg), axisUnit = '次脉冲'; end
+                    stats.Text = sprintf('%g–%g kHz · %d 个频点 × %d %s · %d 条回波窗合成', ...
+                        f(1)/1000,f(end)/1000,numel(f),numel(result.pulse),axisUnit,numel(echoResults));
+                    resultLayout.RowHeight = {40,'1x',36,20,54};
+                    resultScale.row.Visible = 'on';
+                    syncScale(resultScale,curve,scaleSettings.ts,'TS 色阶');
                 end
                 return
             end
@@ -1006,6 +1172,11 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             result.frequency_Hz/1000,numel(result.pulse),result.energyMean_dB,result.peakToPeak_dB);
         if isfield(result,'spectrum') && ~strcmp(figureChoice.Value,figureNames{1})
             sp = result.spectrum;
+            if isempty(result.angle_deg)
+                stats.Text = sprintf('%g–%g kHz · 脉冲能量平均 %.2f dB · 峰值 %.2f dB（脉冲 %d） · 谷值 %.2f dB（脉冲 %d）', ...
+                    sp.frequency_Hz([1 end])/1000,sp.mean_dB,sp.max_dB,sp.maxPulse,sp.min_dB,sp.minPulse);
+                return
+            end
             stats.Text = sprintf(['%g–%g kHz · 所选范围能量平均 %.2f dB · 峰值 %.2f dB（%.2f°）' ...
                 ' · 谷值 %.2f dB（%.2f°） · 峰谷差 %.2f dB'],sp.frequency_Hz([1 end])/1000, ...
                 sp.mean_dB,sp.max_dB,sp.maxAngle_deg,sp.min_dB,sp.minAngle_deg,sp.peakToPeak_dB);
@@ -1020,18 +1191,27 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         cla(ax,'reset'); legend(ax,'off'); colorbar(ax,'off');
         theta = result.angle_deg; xtext = '角度 / °'; ytext = 'TS / dB';
         if bistatic, xtext = '接收方位角 / °'; end
+        repeated = isempty(theta);
+        if repeated, theta = result.pulse; xtext = '脉冲序号'; end
         if isfield(result,'spectrum'), sp = result.spectrum; f = sp.frequency_Hz/1000; end
         switch kind
-            case combinedNames
+            case combinedNames(6:7)
+                c = selectCombination(combined,result.spectrum.frequency_Hz);
+                values = c.coherent_dB;
+                if strcmp(kind,combinedNames{7}), values = c.incoherent_dB; end
+                info = heat(ax,theta,f,values,scaleSettings.ts,false);
+                ytext = '频率 / kHz';
+            case combinedNames(1:5)
                 which = find(strcmp(kind,combinedNames),1);
                 if which<=3
                     [coherent,incoherent] = combinedBandMean();
                     info = '各频点先分别合成，再对扫频网格的线性强度求平均；不跨频点相干相加。';
                     x = theta;
                 else
-                    [coherent,incoherent] = combinedAngleMean();
+                    [coherent,incoherent] = combinedAcquisitionMean();
                     x = f; xtext = '频率 / kHz';
                     info = '各频点分别对扫描角度范围的线性强度作角度积分平均，再转换为 dB。';
+                    if repeated, info = '各频点分别对所选脉冲的线性强度等权平均，再转换为 dB。'; end
                 end
                 if which==1
                     plot(ax,x,coherent,'-','LineWidth',1.3);
@@ -1047,40 +1227,49 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             case figureNames{2}
                 idx = result.echoSamples(1):result.echoSamples(2);
                 signal = analysisSignal();
-                info = heat(ax,theta,(idx-1)*1000/fs,20*log10(abs(signal(idx,result.pulse))),scaleSettings.wave,true);
+                info = heat(ax,theta,timeSeconds(idx)*1000,20*log10(abs(signal(idx,result.pulse))),scaleSettings.wave,true);
                 ytext = '时间 / ms';
             case figureNames{3}
                 targets = ceil(f(1)/5)*5:5:floor(f(end)/5)*5;
                 idx = nearest(f,[f(1) targets f(end)]);
                 curves(ax,theta,sp.TS_dB(idx,:).',compose('%g kHz',f(idx)));
             case figureNames{4}
-                targets = ceil(min(theta)/30)*30:30:floor(max(theta)/30)*30;
-                idx = nearest(theta,[min(theta) targets max(theta)]);
-                curves(ax,f,sp.TS_dB(:,idx),compose('%g°',theta(idx)));
+                if repeated
+                    idx = unique(round(linspace(1,numel(theta),min(5,numel(theta)))));
+                    labels = compose('脉冲 %d',theta(idx));
+                else
+                    targets = ceil(min(theta)/30)*30:30:floor(max(theta)/30)*30;
+                    idx = nearest(theta,[min(theta) targets max(theta)]);
+                    labels = compose('%g°',theta(idx));
+                end
+                curves(ax,f,sp.TS_dB(:,idx),labels);
                 xtext = '频率 / kHz';
             case figureNames{5}
                 info = heat(ax,theta,f,sp.TS_dB,scaleSettings.ts,false); ytext = '频率 / kHz';
             case figureNames{6}
                 plot(ax,theta,sp.bandMean_dB,'-','LineWidth',1.2);
             case figureNames{7}
-                plot(ax,f,sp.angleMean_dB,'-','LineWidth',1.2); xtext = '频率 / kHz';
+                plot(ax,f,sp.recordMean_dB,'-','LineWidth',1.2); xtext = '频率 / kHz';
         end
         xlabel(ax,xtext); ylabel(ax,ytext);
         if any(strcmp(kind,combinedNames(4:5)))
             xlim(ax,[f(1) f(end)]);
         end
-        if any(strcmp(kind,combinedNames(1:3))) || any(strcmp(kind,figureNames([1 2 3 5 6])))
+        if any(strcmp(kind,combinedNames([1 2 3 6 7]))) || any(strcmp(kind,figureNames([1 2 3 5 6])))
             bounds = result.angleLimits_deg;
+            if repeated, bounds = theta([1 end]); end
+            if isscalar(theta), set(findobj(ax,'Type','line'),'Marker','.'); end
             if bounds(1)==bounds(2)
-                % 单一角度需要非零显示跨度，只标出实际角度。
+                % 单个采集位置需要非零显示跨度。
                 xlim(ax,bounds(1)+[-0.5 0.5]); xticks(ax,bounds(1));
             else
                 limits = sort(bounds);
                 xlim(ax,limits); xticks(ax,linspace(limits(1),limits(2),5));
+                if repeated, xticks(ax,unique(round(linspace(limits(1),limits(2),5)))); end
                 if bounds(1)>bounds(2), ax.XDir = 'reverse'; end
             end
         end
-        if ~any(strcmp(kind,figureNames([2 5]))), grid(ax,'on'); end
+        if ~any(strcmp(kind,[figureNames([2 5]) combinedNames(6:7)])), grid(ax,'on'); end
     end
     function [coherent,incoherent] = combinedBandMean()
         % 只使用扫频网格；额外计算的当前单频点不参与平均。
@@ -1088,10 +1277,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         coherent = 10*log10(mean(10.^(c.coherent_dB/10),1));
         incoherent = 10*log10(mean(10.^(c.incoherent_dB/10),1));
     end
-    function [coherent,incoherent] = combinedAngleMean()
+    function [coherent,incoherent] = combinedAcquisitionMean()
         c = selectCombination(combined,result.spectrum.frequency_Hz);
-        coherent = 10*log10(angleMeanPower(result.angle_deg,10.^(c.coherent_dB/10)));
-        incoherent = 10*log10(angleMeanPower(result.angle_deg,10.^(c.incoherent_dB/10)));
+        coherent = 10*log10(acquisitionMeanPower(result.angle_deg,10.^(c.coherent_dB/10)));
+        incoherent = 10*log10(acquisitionMeanPower(result.angle_deg,10.^(c.incoherent_dB/10)));
     end
     function configurePreview(source)
         stylePreviewAxes(source);
@@ -1143,7 +1332,10 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
         savefig(paper,[base '.fig']);
     end
     function exportBundle(varargin)
-        if isempty(result) || ~isfield(result,'spectrum'), return; end
+        if isempty(result), return; end
+        hasSpectrum = isfield(result,'spectrum');
+        exportNames = figureNames(1:2);
+        if hasSpectrum, exportNames = figureNames; end
         captureDraggedScale();
         parent = uigetdir(project,'选择导出位置（将在其下新建结果文件夹）');
         if isequal(parent,0), return; end
@@ -1156,24 +1348,27 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             [ok,msg] = mkdir(dest); assert(ok,'%s',msg);
             checkCancel(dlg);
             saveResultsTo(fullfile(dest,'TS_results.mat'));
-            if bistatic
+            if bistatic && hasSpectrum
                 for j=1:numel(combinedNames)
                     checkCancel(dlg);
                     exportFigurePair(combinedNames{j},fullfile(dest,combinedNames{j}));
                 end
                 [coherent,incoherent] = combinedBandMean();
-                writetable(table(combined.pulse(:),combined.angle_deg(:),coherent(:),incoherent(:), ...
-                    'VariableNames',{'Pulse','Angle_deg','CoherentBandMeanTS_dB','IncoherentBandMeanTS_dB'}), ...
-                    fullfile(dest,'TS_combined_band_mean.csv'));
-                [coherent,incoherent] = combinedAngleMean();
+                t = positionTable(combined,1:numel(combined.pulse));
+                t.CoherentBandMeanTS_dB = coherent(:); t.IncoherentBandMeanTS_dB = incoherent(:);
+                writetable(t,fullfile(dest,'TS_combined_band_mean.csv'));
+                [coherent,incoherent] = combinedAcquisitionMean();
+                meanLabel = 'Angle'; meanFile = 'TS_combined_angle_mean.csv';
+                if isempty(result.angle_deg), meanLabel = 'Pulse'; meanFile = 'TS_combined_pulse_mean.csv'; end
                 writetable(table(result.spectrum.frequency_Hz(:),coherent(:),incoherent(:), ...
-                    'VariableNames',{'Frequency_Hz','CoherentAngleMeanTS_dB','IncoherentAngleMeanTS_dB'}), ...
-                    fullfile(dest,'TS_combined_angle_mean.csv'));
+                    'VariableNames',{'Frequency_Hz',['Coherent' meanLabel 'MeanTS_dB'],['Incoherent' meanLabel 'MeanTS_dB']}), ...
+                    fullfile(dest,meanFile));
+            end
+            if bistatic
                 [hz,index] = ndgrid(combined.frequency_Hz,1:numel(combined.pulse));
-                p = combined.pulse(index(:)); a = combined.angle_deg(index(:));
-                writetable(table(hz(:),p(:),a(:),combined.coherent_dB(:),combined.incoherent_dB(:), ...
-                    'VariableNames',{'Frequency_Hz','Pulse','Angle_deg','CoherentTS_dB','IncoherentTS_dB'}), ...
-                    fullfile(dest,'TS_combined.csv'));
+                t = [table(hz(:),'VariableNames',{'Frequency_Hz'}) positionTable(combined,index(:))];
+                t.CoherentTS_dB = combined.coherent_dB(:); t.IncoherentTS_dB = combined.incoherent_dB(:);
+                writetable(t,fullfile(dest,'TS_combined.csv'));
             end
             originalResult = result;
             restore = onCleanup(@() restoreResult(originalResult));
@@ -1184,11 +1379,11 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
                     targetDir = fullfile(dest,sprintf('回波_%02d',w)); mkdir(targetDir);
                 end
                 writeTables(targetDir,result);
-                for j = 1:numel(figureNames)
-                    base = fullfile(targetDir,sprintf('%02d_%s',j-1,figureNames{j}));
+                for j = 1:numel(exportNames)
+                    base = fullfile(targetDir,sprintf('%02d_%s',j-1,exportNames{j}));
                     checkCancel(dlg);
-                    exportFigurePair(figureNames{j},base);
-                    dlg.Value = ((w-1)*numel(figureNames)+j)/(numel(figureNames)*numel(batch));
+                    exportFigurePair(exportNames{j},base);
+                    dlg.Value = ((w-1)*numel(exportNames)+j)/(numel(exportNames)*numel(batch));
                 end
             end
             status.Text = ['已导出至 ' dest];
@@ -1256,6 +1451,126 @@ fig.WindowButtonUpFcn = @captureDraggedScale;
             uialert(fig,err.message,'导出失败');
         end
     end
+end
+
+function imported = readLTTFolder(selected,channel,dlg)
+% 一个工况一次导入；不递归扫描多个工况，CSV 电压不再应用 TXT 的原始码缩放。
+files = dir(fullfile(selected,'*.csv'));
+if isempty(files)
+    child = fullfile(selected,'00000');
+    files = dir(fullfile(child,'*.csv'));
+    assert(~isempty(files),'%s：没有 CSV。请选择一个 LTT 工况或其 00000 子目录，不要选择多个工况的上级目录。',selected);
+    selected = child;
+end
+tokens = regexp({files.name},'^(.*)_M(\d+)\.csv$','tokens','once','ignorecase');
+bad = find(cellfun(@isempty,tokens),1);
+assert(isempty(bad),'%s：文件名须以 _M采集序号.csv 结尾。',filesName(files,bad));
+prefixes = cellfun(@(t)t{1},tokens,'UniformOutput',false);
+assert(isscalar(unique(prefixes)),'%s：检测到不同采集文件前缀，请将不同工况或批次分开。',selected);
+indices = cellfun(@(t)str2double(t{2}),tokens);
+assert(all(isfinite(indices)) && numel(unique(indices))==numel(indices), ...
+    '%s：M 采集序号无效或重复。',selected);
+[indices,order] = sort(indices); files = files(order);
+count = numel(files); missingMetadata = 0;
+for k=1:count
+    checkCancel(dlg);
+    path = fullfile(selected,files(k).name);
+    try
+        [times,channels,volts,rate] = readLTTRecord(path);
+        if k==1
+            baseline = times; channelNames = channels; sampleRate = rate;
+            if isempty(channel), channel = channels{1}; end
+            channelIndex = find(strcmp(channels,channel),1);
+            assert(~isempty(channelIndex),'找不到所选通道 %s。',channel);
+            values = zeros(numel(times),count);
+        else
+            assert(isequal(channels,channelNames),'电压通道名称或排列顺序与首个文件不一致。');
+            assert(numel(times)==numel(baseline),'采样点数与首个文件不一致（%d / %d）。',numel(times),numel(baseline));
+            tolerance = max(1e-12,1/sampleRate*1e-5);
+            assert(all(abs(times-baseline)<=tolerance),'时间轴与首个文件不一致（含起点和采样间隔）。');
+        end
+        hasMetadata = checkLTTMetadata(path,rate,numel(times),numel(channels));
+        missingMetadata = missingMetadata+~hasMetadata;
+        values(:,k) = volts(:,channelIndex);
+    catch err
+        error('cornerTS:LTTRecord','%s：%s',files(k).name,err.message);
+    end
+    dlg.Value = k/count;
+    dlg.Message = sprintf('LTT · %d / %d 次采集 · %s',k,count,channel);
+end
+checkCancel(dlg);
+imported = struct('values',values,'fs',sampleRate,'timeSeconds',baseline, ...
+    'folder',selected,'channel',channel,'channels',{channelNames}, ...
+    'recordNumbers',indices,'recordFiles',{{files.name}},'missingMetadata',missingMetadata);
+end
+
+function name = filesName(files,index)
+name = ''; if ~isempty(index), name = files(index).name; end
+end
+
+function [times,channels,volts,rate] = readLTTRecord(path)
+fid = fopen(path,'rt'); assert(fid>=0,'无法打开文件。');
+cleanup = onCleanup(@() fclose(fid));
+header = fgetl(fid); assert(ischar(header),'CSV 为空。');
+header = erase(header,char(65279));
+headers = strtrim(strsplit(header,';'));
+headers = cellfun(@(s)strtrim(erase(s,'"')),headers,'UniformOutput',false);
+timeIndex = find(strcmpi(headers,'Time [s]'));
+assert(isscalar(timeIndex),'表头须有且仅有一列 Time [s]。');
+voltageTokens = regexp(headers,'^(.+?)\s*\[V\]$','tokens','once');
+voltageIndex = find(~cellfun(@isempty,voltageTokens));
+assert(~isempty(voltageIndex),'表头未找到单位为 [V] 的电压通道。');
+channels = cellfun(@(t)strtrim(t{1}),voltageTokens(voltageIndex),'UniformOutput',false);
+assert(numel(unique(channels))==numel(channels),'电压通道名重复。');
+data = readmatrix(path,'Delimiter',';','NumHeaderLines',1,'FileType','text');
+assert(size(data,2)==numel(headers) && size(data,1)>=2,'CSV 数据列数与表头不符或不足两个采样点。');
+times = data(:,timeIndex); volts = data(:,voltageIndex);
+assert(all(isfinite(times)) && all(isfinite(volts(:))),'时间或电压存在缺失/非有限值。');
+intervals = diff(times);
+assert(all(intervals>0),'时间列必须严格递增。');
+dt = mean(intervals);
+assert(all(abs(intervals-dt)<=max(1e-12,dt*1e-5)),'时间列不是等间隔采样。');
+rate = 1/dt;
+assert(isfinite(rate) && rate>0,'时间列无法确定有效采样率。');
+end
+
+function available = checkLTTMetadata(csvPath,rate,samples,channels)
+[parent,name] = fileparts(csvPath); path = fullfile(parent,[name '.txt']);
+available = isfile(path);
+if ~available, return; end
+metadata = fileread(path);
+number = '([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)';
+token = regexpi(metadata,['Timebase:\s*' number '\s*(GHz|MHz|kHz|Hz)'],'tokens','once');
+if ~isempty(token)
+    units = {'hz','khz','mhz','ghz'};
+    multiplier = 1000^(find(strcmpi(token{2},units),1)-1);
+    value = str2double(token{1})*multiplier;
+    % Timebase 的频率文本可能只保留两位小数，容许其末位舍入误差。
+    mantissa = regexp(token{1},'^\d+(?:\.(\d*))?','tokens','once');
+    decimals = 0; if ~isempty(mantissa) && ~isempty(mantissa{1}), decimals = numel(mantissa{1}); end
+    exponent = regexp(token{1},'[eE]([+-]?\d+)','tokens','once');
+    power = 0; if ~isempty(exponent), power = str2double(exponent{1}); end
+    tolerance = .5*10^(power-decimals)*multiplier+rate*1e-8;
+    assert(abs(rate-value)<=tolerance,'TXT Timebase 频率与 CSV 不一致（TXT %g Hz，CSV %g Hz）。',value,rate);
+end
+period = regexpi(metadata,['Timebase:[^\r\n]*\(\s*' number '\s*(ns|us|µs|μs|ms|s)\s*\)'],'tokens','once');
+if ~isempty(period)
+    switch lower(period{2})
+        case 'ns', factor=1e-9;
+        case {'us','µs','μs'}, factor=1e-6;
+        case 'ms', factor=1e-3;
+        otherwise, factor=1;
+    end
+    dt = str2double(period{1})*factor;
+    assert(abs(dt-1/rate)<=max(1e-12,dt*1e-5),'TXT Timebase 采样间隔与 CSV 不一致。');
+end
+token = regexpi(metadata,'Sequences:\s*(\d+)(?:\s*\[\s*(\d+)\s+channels?\s+each\])?','tokens','once');
+if ~isempty(token)
+    assert(str2double(token{1})==samples,'TXT Sequences 与 CSV 点数不一致（TXT %s，CSV %d）。',token{1},samples);
+    if numel(token)>1 && ~isempty(token{2})
+        assert(str2double(token{2})==channels,'TXT 通道数与 CSV 电压通道数不一致。');
+    end
+end
 end
 
 function checkCancel(dlg)
@@ -1380,24 +1695,32 @@ for first = 1:32:size(signals,2)
 end
 end
 
-function average = angleMeanPower(theta,power)
-if isscalar(theta)
+function average = acquisitionMeanPower(theta,power)
+if isempty(theta)
+    average = mean(power,2); % 固定方位独立重复采集，每列等权。
+elseif isscalar(theta)
     average = power;
 else
     average = trapz(theta,power,2)/(theta(end)-theta(1));
 end
 end
 
-function sp = summarizeSpectrum(theta,f,ratio)
+function sp = summarizeSpectrum(theta,pulses,f,ratio)
 power = ratio.^2;
 acrossFrequency = mean(power,1);
-acrossAngle = angleMeanPower(theta,power);
+acrossAcquisitions = acquisitionMeanPower(theta,power);
 sp = struct('frequency_Hz',f,'TS_dB',20*log10(ratio), ...
-    'bandMean_dB',10*log10(acrossFrequency),'angleMean_dB',10*log10(acrossAngle), ...
-    'mean_dB',10*log10(mean(acrossAngle)));
+    'bandMean_dB',10*log10(acrossFrequency),'recordMean_dB',10*log10(acrossAcquisitions), ...
+    'mean_dB',10*log10(mean(acrossAcquisitions)));
 [sp.max_dB,imax] = max(sp.bandMean_dB);
 [sp.min_dB,imin] = min(sp.bandMean_dB);
-sp.maxAngle_deg = theta(imax); sp.minAngle_deg = theta(imin);
+if isempty(theta)
+    sp.maxPulse = pulses(imax); sp.minPulse = pulses(imin);
+    sp.pulseMean_dB = sp.recordMean_dB;
+else
+    sp.maxAngle_deg = theta(imax); sp.minAngle_deg = theta(imin);
+    sp.angleMean_dB = sp.recordMean_dB;
+end
 sp.peakToPeak_dB = sp.max_dB-sp.min_dB;
 end
 
@@ -1483,7 +1806,46 @@ if isequal(bounds,getappdata(ax,'scaleBounds')) && isgraphics(cb,'colorbar') && 
 end
 end
 
+function t = positionTable(res,idx)
+p = res.pulse(idx); t = table(p(:),'VariableNames',{'Pulse'});
+if ~isempty(res.angle_deg)
+    a = res.angle_deg(idx); t.Angle_deg = a(:);
+end
+end
+
 function writeTables(dest,res)
+if isempty(res.angle_deg)
+    t = positionTable(res,1:numel(res.pulse));
+    t.Frequency_Hz = repmat(res.frequency_Hz,height(t),1);
+    t.SingleFrequencyTS_dB = res.TS_dB(:);
+    if isfield(res,'spectrum')
+        sp = res.spectrum;
+        t.BandEnergyMeanTS_dB = sp.bandMean_dB(:);
+        writetable(table(sp.frequency_Hz(:),sp.pulseMean_dB(:), ...
+            'VariableNames',{'Frequency_Hz','PulseEnergyMeanTS_dB'}),fullfile(dest,'TS_by_frequency.csv'));
+        [hz,k] = ndgrid(sp.frequency_Hz,1:numel(res.pulse));
+        spectrum = positionTable(res,k(:)); spectrum.Frequency_Hz = hz(:); spectrum.TS_dB = sp.TS_dB(:);
+        writetable(spectrum,fullfile(dest,'TS_spectrum.csv'));
+        summary = table(sp.frequency_Hz(1),sp.frequency_Hz(end),sp.mean_dB,sp.max_dB,sp.maxPulse,sp.min_dB,sp.minPulse,sp.peakToPeak_dB, ...
+            'VariableNames',{'BandStart_Hz','BandEnd_Hz','Mean_dB','Max_dB','MaxPulse','Min_dB','MinPulse','PeakToPeak_dB'});
+    else
+        summary = table(res.frequency_Hz,res.energyMean_dB,res.peakToPeak_dB, ...
+            'VariableNames',{'Frequency_Hz','PulseEnergyMeanTS_dB','PeakToPeak_dB'});
+    end
+    writetable(t,fullfile(dest,'TS_by_pulse.csv'));
+    writetable(summary,fullfile(dest,'TS_statistics.csv'));
+    return
+end
+if ~isfield(res,'spectrum')
+    hz = repmat(res.frequency_Hz,numel(res.pulse),1);
+    writetable(table(hz,res.pulse(:),res.angle_deg(:),res.TS_dB(:), ...
+        'VariableNames',{'Frequency_Hz','Pulse','Angle_deg','SingleFrequencyTS_dB'}), ...
+        fullfile(dest,'TS_by_angle.csv'));
+    writetable(table(res.frequency_Hz,res.energyMean_dB,res.peakToPeak_dB, ...
+        'VariableNames',{'Frequency_Hz','AngleEnergyMeanTS_dB','PeakToPeak_dB'}), ...
+        fullfile(dest,'TS_statistics.csv'));
+    return
+end
 sp = res.spectrum;
 writetable(table(res.pulse(:),res.angle_deg(:),res.TS_dB(:),sp.bandMean_dB(:), ...
     'VariableNames',{'Pulse','Angle_deg','SingleFrequencyTS_dB','BandEnergyMeanTS_dB'}), ...
