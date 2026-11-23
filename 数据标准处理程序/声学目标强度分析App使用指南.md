@@ -1,6 +1,6 @@
-# 角反射体 TS 处理 App 快速上手
+# 声学目标强度分析 App 快速上手
 
-在 MATLAB 中打开 [corner_ts_app.m](./corner_ts_app.m)，点击 **运行**。
+在 MATLAB 中打开 [target_strength_app.m](./target_strength_app.m)，点击 **运行**。
 
 首页选择 **合置处理** 或 **分置处理**。点击 **返回首页**（或关闭处理页）会保留两页各自的进度；关闭首页结束本次会话。
 
