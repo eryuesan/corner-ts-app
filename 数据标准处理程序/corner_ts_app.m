@@ -1,5 +1,5 @@
 function corner_ts_app
-versionTag = 'v2.5';
+versionTag = 'v2.6';
 store = fullfile(prefdir,'corner-ts-app','versions');
 [newer,entry] = installedVersion(store,versionTag);
 if ~isempty(newer)
@@ -12,7 +12,12 @@ home = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximize
 shell = uigridlayout(home,[5 4],'RowHeight',{48,'1x',60,72,'1x'}, ...
     'ColumnWidth',{'1x',174,174,'1x'},'Padding',[16 12 16 16], ...
     'ColumnSpacing',12,'RowSpacing',12,'BackgroundColor',mist);
-hdr = appHeader(shell,'角反射体试验',@about);
+repo = 'https://github.com/eryuesan/corner-ts-app';
+manifest = []; checkJob = []; installing = false;
+updateButtons = gobjects(0); aboutFig = []; aboutUI = [];
+updateStatus = '正在检查更新…';
+releaseNotes = "启动时后台检查更新，发现新版后可在标题栏更新并重启 App。";
+hdr = makeHeader(shell,'角反射体试验');
 hdr.Layout.Row = 1; hdr.Layout.Column = [1 4];
 h = uilabel(shell,'Text','目标强度处理','FontSize',30,'FontWeight','bold', ...
     'FontColor',blue,'HorizontalAlignment','center');
@@ -24,11 +29,110 @@ for k=1:2
         'BackgroundColor',blue,'FontColor','white','ButtonPushedFcn',@(~,~) enter(k));
     b.Layout.Row = 4; b.Layout.Column = k+1;
 end
-aboutFig = [];
 home.CloseRequestFcn = @finish;
+drawnow limitrate nocallbacks
+checkUpdate();
+    function header = makeHeader(parent,name)
+        header = uigridlayout(parent,[1 3],'ColumnWidth',{'1x',78,78},'Padding',[16 5 6 5], ...
+            'BackgroundColor',[.09 .26 .36]);
+        uilabel(header,'Text',name,'FontWeight','bold','FontSize',16,'FontColor','white');
+        btn = uibutton(header,'Text','更新','Visible',~isempty(manifest), ...
+            'ButtonPushedFcn',@installUpdate,'BackgroundColor',[.12 .46 .42],'FontColor','white');
+        updateButtons(end+1) = btn;
+        uibutton(header,'Text','关于','Tooltip','查看版本和检查更新','ButtonPushedFcn',@about, ...
+            'BackgroundColor',[.16 .35 .44],'FontColor','white');
+    end
     function about(varargin)
         if ~isempty(aboutFig) && isgraphics(aboutFig), figure(aboutFig); return; end
-        aboutFig = appAbout(versionTag,store);
+        [aboutFig,aboutUI] = appAbout(versionTag,repo,@checkUpdate,@installUpdate);
+        syncUpdate();
+        aboutFig.Visible = 'on';
+    end
+    function syncUpdate()
+        for btn = reshape(updateButtons(isgraphics(updateButtons)),1,[])
+            btn.Visible = ~isempty(manifest);
+            btn.Enable = isempty(checkJob) && ~installing;
+        end
+        if isempty(aboutFig) || ~isgraphics(aboutFig), return; end
+        aboutUI.notes.Value = releaseNotes;
+        aboutUI.status.Text = updateStatus;
+        aboutUI.check.Enable = isempty(checkJob) && ~installing;
+        aboutUI.install.Enable = isempty(checkJob) && ~installing && ~isempty(manifest);
+    end
+    function checkUpdate(varargin)
+        if ~isempty(checkJob) || installing, return; end
+        try
+            updateStatus = '正在查询 GitHub 最新正式版…';
+            opts = weboptions('ContentType','json','Timeout',15);
+            checkJob = parfeval(backgroundPool,@webread,1, ...
+                [repo '/releases/latest/download/corner-ts-update.json'],opts);
+            afterEach(checkJob,@checked,0,'PassFuture',true);
+        catch err
+            checkJob = [];
+            updateStatus = ['无法检查更新。' err.message];
+        end
+        syncUpdate();
+    end
+    function checked(job)
+        if ~isgraphics(home), return; end
+        checkJob = [];
+        try
+            info = fetchOutputs(job);
+            assert(isstruct(info) && isscalar(info) && all(isfield(info,{'version','notes','sha256'})) ...
+                && ischar(info.notes) && ischar(info.sha256) ...
+                && ~isempty(regexp(info.sha256,'^[0-9a-fA-F]{64}$','once')),'发布清单格式无效。');
+            newerAvailable = isNewer(versionParts(info.version),versionParts(versionTag));
+            releaseNotes = splitlines(string(info.notes));
+            if newerAvailable
+                manifest = info;
+                updateStatus = ['发现新版本 ' info.version '。'];
+            else
+                manifest = [];
+                updateStatus = ['已是最新或更高版本。GitHub 正式版 ' info.version];
+            end
+        catch err
+            updateStatus = ['无法检查更新，可稍后重试。' err.message];
+        end
+        syncUpdate();
+    end
+    function installUpdate(src,~)
+        if installing || opening || ~isempty(checkJob) || isempty(manifest), return; end
+        parent = ancestor(src,'figure');
+        installing = true;
+        restore = onCleanup(@endInstall);
+        syncUpdate();
+        choice = uiconfirm(parent, ...
+            '更新会重新打开 App。请先保存合置和分置页面中需要保留的结果，未保存的处理进度将在重启时清除。', ...
+            ['更新至 ' manifest.version],'Options',{'返回保存','已保存，更新并重启'}, ...
+            'DefaultOption',1,'CancelOption',1,'Icon','warning');
+        if ~strcmp(choice,'已保存，更新并重启'), return; end
+        progress = uiprogressdlg(parent,'Title','更新 App','Message','正在下载并校验更新包…','Indeterminate','on');
+        closeProgress = onCleanup(@() close(progress));
+        try
+            [ready,newEntry] = installedVersion(store,versionTag);
+            if isempty(ready) || isNewer(versionParts(manifest.version),versionParts(ready))
+                tempZip = [tempname '.zip'];
+                cleanup = onCleanup(@() deleteIfPresent(tempZip));
+                url = [repo '/releases/download/' manifest.version '/corner-ts-app.zip'];
+                websave(tempZip,url,weboptions('ContentType','binary','Timeout',60));
+                installPackage(tempZip,manifest,store);
+                [~,newEntry] = installedVersion(store,versionTag);
+            end
+            progress.Message = '正在启动新版 App…';
+            addpath(store,'-begin');
+            feval(newEntry);
+        catch err
+            clear closeProgress
+            updateStatus = ['更新失败。' err.message];
+            uialert(parent,updateStatus,'更新失败');
+            return
+        end
+        clear closeProgress restore
+        finish();
+    end
+    function endInstall()
+        installing = false;
+        if isgraphics(home), syncUpdate(); end
     end
     function enter(index)
         if opening, return; end
@@ -41,7 +145,7 @@ home.CloseRequestFcn = @finish;
             drawnow; % 先显示提示，再创建控件较多的处理界面。
             if ~isgraphics(home), return; end
             if ~isgraphics(sessions(index))
-                sessions(index) = processingSession(index==2,@back,@about);
+                sessions(index) = processingSession(index==2,@back,@makeHeader);
                 sessions(index).CloseRequestFcn = @(src,~) back(src);
             end
             sessions(index).Visible = 'on';
@@ -63,22 +167,14 @@ home.CloseRequestFcn = @finish;
         home.Visible = 'on'; page.Visible = 'off';
     end
     function finish(varargin)
+        if installing, return; end
+        if ~isempty(checkJob), cancel(checkJob); end
         if ~isempty(aboutFig) && isgraphics(aboutFig), delete(aboutFig); end
         delete(sessions(isgraphics(sessions))); delete(home);
     end
 end
 
-function header = appHeader(parent,name,about)
-header = uigridlayout(parent,[1 2],'ColumnWidth',{'1x',78},'Padding',[16 5 6 5], ...
-    'BackgroundColor',[.09 .26 .36]);
-uilabel(header,'Text',name,'FontWeight','bold','FontSize',16,'FontColor','white');
-uibutton(header,'Text','关于','Tooltip','查看版本和检查更新','ButtonPushedFcn',about, ...
-    'BackgroundColor',[.16 .35 .44],'FontColor','white');
-end
-
-function fig = appAbout(versionTag,store)
-repo = 'https://github.com/eryuesan/corner-ts-app';
-manifest = [];
+function [fig,ui] = appAbout(versionTag,repo,checkUpdate,installUpdate)
 fig = uifigure('Name','关于 · 角反射体 TS','Position',[100 100 500 330], ...
     'Visible','off');
 movegui(fig,'center');
@@ -87,72 +183,18 @@ g = uigridlayout(fig,[5 3],'RowHeight',{38,24,'1x',44,34}, ...
 h = uilabel(g,'Text','角反射体目标强度处理','FontWeight','bold','FontSize',21, ...
     'FontColor',[.09 .26 .36]); h.Layout.Column = [1 3];
 h = uilabel(g,'Text',['当前版本  ' versionTag]); h.Layout.Row = 2; h.Layout.Column = [1 3];
-notes = uitextarea(g,'Editable','off','Value',{'本版更新','首页与处理页新增版本信息、检查更新和下载入口。'});
+notes = uitextarea(g,'Editable','off');
 notes.Layout.Row = 3; notes.Layout.Column = [1 3];
 status = uilabel(g,'Text','点击检查更新以查询 GitHub 正式版。','WordWrap','on');
 status.Layout.Row = 4; status.Layout.Column = [1 3];
 link = uibutton(g,'Text','GitHub 仓库','ButtonPushedFcn',@(~,~) web(repo,'-browser'));
 link.Layout.Row = 5; link.Layout.Column = 1;
-check = uibutton(g,'Text','检查更新','ButtonPushedFcn',@checkUpdate);
+check = uibutton(g,'Text','检查更新','ButtonPushedFcn',checkUpdate);
 check.Layout.Row = 5; check.Layout.Column = 2;
-install = uibutton(g,'Text','下载更新','Enable','off','ButtonPushedFcn',@installUpdate, ...
+install = uibutton(g,'Text','更新并重启','Enable','off','ButtonPushedFcn',installUpdate, ...
     'BackgroundColor',[.09 .26 .36],'FontColor','white');
 install.Layout.Row = 5; install.Layout.Column = 3;
-fig.Visible = 'on';
-    function checkUpdate(varargin)
-        manifest = [];
-        check.Enable = 'off'; install.Enable = 'off';
-        status.Text = '正在查询最新正式版…'; drawnow;
-        if ~isgraphics(fig), return; end
-        try
-            update = webread([repo '/releases/latest/download/corner-ts-update.json'], ...
-                weboptions('ContentType','json','Timeout',15));
-            if ~isstruct(update) || ~isscalar(update) || ~all(isfield(update,{'version','notes','sha256'})) ...
-                    || ~ischar(update.version) || ~ischar(update.notes) || ~ischar(update.sha256) ...
-                    || isempty(regexp(update.sha256,'^[0-9a-fA-F]{64}$','once'))
-                error('发布清单格式无效。');
-            end
-            available = versionParts(update.version);
-            if ~isgraphics(fig), return; end
-            notes.Value = splitlines(string(update.notes));
-            [ready,~] = installedVersion(store,versionTag);
-            if ~isNewer(available,versionParts(versionTag))
-                status.Text = ['当前版本已是最新或更高版本。GitHub 正式版 ' update.version];
-            elseif ~isempty(ready) && ~isNewer(available,versionParts(ready))
-                status.Text = [ready ' 已安装，重新打开 App 即可使用。'];
-            else
-                manifest = update; install.Enable = 'on';
-                status.Text = ['发现新版本 ' update.version '。可下载后在下次启动时使用。'];
-            end
-        catch err
-            if ~isgraphics(fig), return; end
-            if contains(err.identifier,'HTTP404')
-                status.Text = 'GitHub 尚无带更新清单的正式版。';
-            else
-                status.Text = ['无法获取更新清单，请检查网络或查看 GitHub 发布页。' err.message];
-            end
-        end
-        check.Enable = 'on';
-    end
-    function installUpdate(varargin)
-        if isempty(manifest), return; end
-        check.Enable = 'off'; install.Enable = 'off';
-        status.Text = ['正在下载并校验 ' manifest.version '…']; drawnow;
-        if ~isgraphics(fig), return; end
-        try
-            tempZip = [tempname '.zip'];
-            cleanup = onCleanup(@() deleteIfPresent(tempZip));
-            url = [repo '/releases/download/' manifest.version '/corner-ts-app.zip'];
-            websave(tempZip,url,weboptions('ContentType','binary','Timeout',60));
-            installPackage(tempZip,manifest,store);
-            if ~isgraphics(fig), return; end
-            status.Text = [manifest.version ' 已安装。完成当前工作后，关闭并重新打开 App。'];
-        catch err
-            if ~isgraphics(fig), return; end
-            status.Text = ['更新失败。' err.message]; install.Enable = 'on';
-        end
-        check.Enable = 'on';
-    end
+ui = struct('notes',notes,'status',status,'check',check,'install',install);
 end
 
 function parts = versionParts(tag)
@@ -231,7 +273,7 @@ function removeStage(path)
 if isfolder(path), rmdir(path,'s'); end
 end
 
-function fig = processingSession(bistatic,goHome,about)
+function fig = processingSession(bistatic,goHome,makeHeader)
 % 角反射体 TS 处理界面。支持单频与频率扫描，每列对应一个原始脉冲。
 project = fileparts(fileparts(mfilename('fullpath')));
 [~,appFolder] = fileparts(fileparts(mfilename('fullpath')));
@@ -254,7 +296,7 @@ combinedNames = {'多窗频带能量平均 TS 对比','多窗相干频带能量�
     '多窗相干 TS 频率–角度谱','多窗非相干 TS 频率–角度谱'};
 layout = uigridlayout(fig,[2 2],'RowHeight',{40,'1x'},'ColumnWidth',{355,'1x'}, ...
     'BackgroundColor',[.94 .96 .97],'Padding',[12 10 12 12]);
-hdr = appHeader(layout,['目标强度处理  /  ' pageName],about);
+hdr = makeHeader(layout,['目标强度处理  /  ' pageName]);
 hdr.Layout.Row = 1; hdr.Layout.Column = [1 2];
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
