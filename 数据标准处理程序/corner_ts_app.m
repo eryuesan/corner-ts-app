@@ -1,16 +1,35 @@
 function corner_ts_app
+versionTag = 'v2.5';
+store = fullfile(prefdir,'corner-ts-app','versions');
+[newer,entry] = installedVersion(store,versionTag);
+if ~isempty(newer)
+    addpath(store,'-begin');
+    feval(entry);
+    return
+end
+blue = [0.09 0.26 0.36]; mist = [0.94 0.96 0.97];
 home = uifigure('Name','角反射体试验 · TS 处理','WindowState','maximized');
-shell = uigridlayout(home,[5 3],'RowHeight',{'1x',48,65,65,'1x'}, ...
-    'ColumnWidth',{'1x',300,'1x'},'BackgroundColor',[.95 .97 .97]);
-h = uilabel(shell,'Text','选择数据处理类型','FontSize',22,'HorizontalAlignment','center');
-h.Layout.Row = 2; h.Layout.Column = 2;
+shell = uigridlayout(home,[5 4],'RowHeight',{48,'1x',60,72,'1x'}, ...
+    'ColumnWidth',{'1x',174,174,'1x'},'Padding',[16 12 16 16], ...
+    'ColumnSpacing',12,'RowSpacing',12,'BackgroundColor',mist);
+hdr = appHeader(shell,'角反射体试验',@about);
+hdr.Layout.Row = 1; hdr.Layout.Column = [1 4];
+h = uilabel(shell,'Text','目标强度处理','FontSize',30,'FontWeight','bold', ...
+    'FontColor',blue,'HorizontalAlignment','center');
+h.Layout.Row = 3; h.Layout.Column = [2 3];
 names = {'合置处理','分置处理'}; sessions = gobjects(1,2);
 opening = false;
 for k=1:2
-    b = uibutton(shell,'Text',names{k},'FontSize',18,'ButtonPushedFcn',@(~,~) enter(k));
-    b.Layout.Row = k+2; b.Layout.Column = 2;
+    b = uibutton(shell,'Text',names{k},'FontSize',18,'FontWeight','bold', ...
+        'BackgroundColor',blue,'FontColor','white','ButtonPushedFcn',@(~,~) enter(k));
+    b.Layout.Row = 4; b.Layout.Column = k+1;
 end
+aboutFig = [];
 home.CloseRequestFcn = @finish;
+    function about(varargin)
+        if ~isempty(aboutFig) && isgraphics(aboutFig), figure(aboutFig); return; end
+        aboutFig = appAbout(versionTag,store);
+    end
     function enter(index)
         if opening, return; end
         opening = true;
@@ -22,7 +41,7 @@ home.CloseRequestFcn = @finish;
             drawnow; % 先显示提示，再创建控件较多的处理界面。
             if ~isgraphics(home), return; end
             if ~isgraphics(sessions(index))
-                sessions(index) = processingSession(index==2,@back);
+                sessions(index) = processingSession(index==2,@back,@about);
                 sessions(index).CloseRequestFcn = @(src,~) back(src);
             end
             sessions(index).Visible = 'on';
@@ -44,13 +63,179 @@ home.CloseRequestFcn = @finish;
         home.Visible = 'on'; page.Visible = 'off';
     end
     function finish(varargin)
+        if ~isempty(aboutFig) && isgraphics(aboutFig), delete(aboutFig); end
         delete(sessions(isgraphics(sessions))); delete(home);
     end
 end
 
-function fig = processingSession(bistatic,goHome)
+function header = appHeader(parent,name,about)
+header = uigridlayout(parent,[1 2],'ColumnWidth',{'1x',78},'Padding',[16 5 6 5], ...
+    'BackgroundColor',[.09 .26 .36]);
+uilabel(header,'Text',name,'FontWeight','bold','FontSize',16,'FontColor','white');
+uibutton(header,'Text','关于','Tooltip','查看版本和检查更新','ButtonPushedFcn',about, ...
+    'BackgroundColor',[.16 .35 .44],'FontColor','white');
+end
+
+function fig = appAbout(versionTag,store)
+repo = 'https://github.com/eryuesan/corner-ts-app';
+manifest = [];
+fig = uifigure('Name','关于 · 角反射体 TS','Position',[100 100 500 330], ...
+    'Visible','off');
+movegui(fig,'center');
+g = uigridlayout(fig,[5 3],'RowHeight',{38,24,'1x',44,34}, ...
+    'ColumnWidth',{'1x',105,110},'Padding',[20 15 20 15],'BackgroundColor',[.95 .97 .98]);
+h = uilabel(g,'Text','角反射体目标强度处理','FontWeight','bold','FontSize',21, ...
+    'FontColor',[.09 .26 .36]); h.Layout.Column = [1 3];
+h = uilabel(g,'Text',['当前版本  ' versionTag]); h.Layout.Row = 2; h.Layout.Column = [1 3];
+notes = uitextarea(g,'Editable','off','Value',{'本版更新','首页与处理页新增版本信息、检查更新和下载入口。'});
+notes.Layout.Row = 3; notes.Layout.Column = [1 3];
+status = uilabel(g,'Text','点击检查更新以查询 GitHub 正式版。','WordWrap','on');
+status.Layout.Row = 4; status.Layout.Column = [1 3];
+link = uibutton(g,'Text','GitHub 仓库','ButtonPushedFcn',@(~,~) web(repo,'-browser'));
+link.Layout.Row = 5; link.Layout.Column = 1;
+check = uibutton(g,'Text','检查更新','ButtonPushedFcn',@checkUpdate);
+check.Layout.Row = 5; check.Layout.Column = 2;
+install = uibutton(g,'Text','下载更新','Enable','off','ButtonPushedFcn',@installUpdate, ...
+    'BackgroundColor',[.09 .26 .36],'FontColor','white');
+install.Layout.Row = 5; install.Layout.Column = 3;
+fig.Visible = 'on';
+    function checkUpdate(varargin)
+        manifest = [];
+        check.Enable = 'off'; install.Enable = 'off';
+        status.Text = '正在查询最新正式版…'; drawnow;
+        if ~isgraphics(fig), return; end
+        try
+            update = webread([repo '/releases/latest/download/corner-ts-update.json'], ...
+                weboptions('ContentType','json','Timeout',15));
+            if ~isstruct(update) || ~isscalar(update) || ~all(isfield(update,{'version','notes','sha256'})) ...
+                    || ~ischar(update.version) || ~ischar(update.notes) || ~ischar(update.sha256) ...
+                    || isempty(regexp(update.sha256,'^[0-9a-fA-F]{64}$','once'))
+                error('发布清单格式无效。');
+            end
+            available = versionParts(update.version);
+            if ~isgraphics(fig), return; end
+            notes.Value = splitlines(string(update.notes));
+            [ready,~] = installedVersion(store,versionTag);
+            if ~isNewer(available,versionParts(versionTag))
+                status.Text = ['当前版本已是最新或更高版本。GitHub 正式版 ' update.version];
+            elseif ~isempty(ready) && ~isNewer(available,versionParts(ready))
+                status.Text = [ready ' 已安装，重新打开 App 即可使用。'];
+            else
+                manifest = update; install.Enable = 'on';
+                status.Text = ['发现新版本 ' update.version '。可下载后在下次启动时使用。'];
+            end
+        catch err
+            if ~isgraphics(fig), return; end
+            if contains(err.identifier,'HTTP404')
+                status.Text = 'GitHub 尚无带更新清单的正式版。';
+            else
+                status.Text = ['无法获取更新清单，请检查网络或查看 GitHub 发布页。' err.message];
+            end
+        end
+        check.Enable = 'on';
+    end
+    function installUpdate(varargin)
+        if isempty(manifest), return; end
+        check.Enable = 'off'; install.Enable = 'off';
+        status.Text = ['正在下载并校验 ' manifest.version '…']; drawnow;
+        if ~isgraphics(fig), return; end
+        try
+            tempZip = [tempname '.zip'];
+            cleanup = onCleanup(@() deleteIfPresent(tempZip));
+            url = [repo '/releases/download/' manifest.version '/corner-ts-app.zip'];
+            websave(tempZip,url,weboptions('ContentType','binary','Timeout',60));
+            installPackage(tempZip,manifest,store);
+            if ~isgraphics(fig), return; end
+            status.Text = [manifest.version ' 已安装。完成当前工作后，关闭并重新打开 App。'];
+        catch err
+            if ~isgraphics(fig), return; end
+            status.Text = ['更新失败。' err.message]; install.Enable = 'on';
+        end
+        check.Enable = 'on';
+    end
+end
+
+function parts = versionParts(tag)
+assert(ischar(tag) && ~isempty(regexp(tag,'^v(0|[1-9]\d{0,5})(\.(0|[1-9]\d{0,5})){1,2}$','once')), ...
+    '无效的正式版本号。');
+parts = [sscanf(tag(2:end),'%u.%u.%u').' 0 0];
+parts = parts(1:3);
+end
+
+function tf = isNewer(left,right)
+k = find(left~=right,1);
+tf = ~isempty(k) && left(k)>right(k);
+end
+
+function [tag,entry] = installedVersion(store,current)
+tag = ''; entry = ''; best = versionParts(current);
+folders = dir(fullfile(store,'+corner_ts_v*'));
+for k=1:numel(folders)
+    name = folders(k).name;
+    candidate = strrep(extractAfter(name,'+corner_ts_'),'_','.');
+    if isempty(regexp(candidate,'^v(0|[1-9]\d{0,5})(\.(0|[1-9]\d{0,5})){1,2}$','once')) ...
+            || ~isfile(fullfile(store,name,'corner_ts_app.m')), continue; end
+    parts = versionParts(candidate);
+    if isNewer(parts,best)
+        best = parts; tag = candidate; entry = [name(2:end) '.corner_ts_app'];
+    end
+end
+end
+
+function installPackage(zipPath,manifest,store)
+versionParts(manifest.version);
+file = dir(zipPath);
+assert(isscalar(file) && file.bytes<=8*1024^2,'更新包大小异常。');
+fid = fopen(zipPath,'rb'); assert(fid>=0,'无法打开下载文件。');
+closeFile = onCleanup(@() fclose(fid));
+hash = java.security.MessageDigest.getInstance('SHA-256');
+hash.update(fread(fid,Inf,'*int8'));
+actual = reshape(dec2hex(typecast(hash.digest(),'uint8'),2).',1,[]);
+assert(strcmpi(actual,manifest.sha256),'下载文件的 SHA-256 与发布清单不符，请重试。');
+if ~isfolder(store), [ok,msg] = mkdir(store); assert(ok,'%s',msg); end
+stage = tempname(store); [ok,msg] = mkdir(stage); assert(ok,'%s',msg);
+cleanup = onCleanup(@() removeStage(stage));
+archive = java.util.zip.ZipFile(zipPath);
+closeArchive = onCleanup(@() archive.close());
+items = archive.entries();
+allowed = {'corner_ts_app.m','角反射体TS处理App使用指南.md','脉冲维高通滤波逐行讲解.md'};
+seen = {};
+while items.hasMoreElements()
+    item = items.nextElement(); name = char(item.getName());
+    assert(ismember(name,allowed) && ~ismember(name,seen) && item.getSize()>=0 ...
+        && item.getSize()<=4*1024^2,'更新包包含不支持的文件。');
+    seen{end+1} = name; %#ok<AGROW>
+    stream = archive.getInputStream(item);
+    closeStream = onCleanup(@() stream.close());
+    target = java.io.File(fullfile(stage,name));
+    java.nio.file.Files.copy(stream,target.toPath(),javaArray('java.nio.file.CopyOption',0));
+    clear closeStream
+end
+appFile = fullfile(stage,'corner_ts_app.m');
+assert(isfile(appFile) && contains(fileread(appFile),['versionTag = ''' manifest.version ''';']), ...
+    '更新包缺少对应版本的程序入口。');
+dest = fullfile(store,['+corner_ts_' strrep(manifest.version,'.','_')]);
+% 同一文件系统的目录改名一次完成，启动器始终只能看到完整版本。
+if ~isfile(fullfile(dest,'corner_ts_app.m'))
+    src = java.io.File(stage); dst = java.io.File(dest);
+    assert(src.renameTo(dst) || isfile(fullfile(dest,'corner_ts_app.m')),'无法安装到本地版本目录。');
+end
+rehash;
+end
+
+function deleteIfPresent(path)
+if isfile(path), delete(path); end
+end
+
+function removeStage(path)
+if isfolder(path), rmdir(path,'s'); end
+end
+
+function fig = processingSession(bistatic,goHome,about)
 % 角反射体 TS 处理界面。支持单频与频率扫描，每列对应一个原始脉冲。
 project = fileparts(fileparts(mfilename('fullpath')));
+[~,appFolder] = fileparts(fileparts(mfilename('fullpath')));
+if startsWith(appFolder,'+corner_ts_v'), project = pwd; end
 raw = []; bp = []; mf = []; fs = []; folder = ''; result = [];
 activeChannel = '';
 dataOrigin = ''; timeSeconds = []; recordNumbers = []; recordFiles = {};
@@ -67,9 +252,13 @@ combined = [];
 combinedNames = {'多窗频带能量平均 TS 对比','多窗相干频带能量平均 TS','多窗非相干频带能量平均 TS', ...
     '多窗相干角度能量平均 TS–频率曲线','多窗非相干角度能量平均 TS–频率曲线', ...
     '多窗相干 TS 频率–角度谱','多窗非相干 TS 频率–角度谱'};
-layout = uigridlayout(fig,[1 2],'ColumnWidth',{355,'1x'},'Padding',[12 12 12 12]);
+layout = uigridlayout(fig,[2 2],'RowHeight',{40,'1x'},'ColumnWidth',{355,'1x'}, ...
+    'BackgroundColor',[.94 .96 .97],'Padding',[12 10 12 12]);
+hdr = appHeader(layout,['目标强度处理  /  ' pageName],about);
+hdr.Layout.Row = 1; hdr.Layout.Column = [1 2];
 % 左栏的设置可以滚动，状态栏始终可见。
 sidebar = uigridlayout(layout,[2 1],'RowHeight',{'1x',54},'Padding',[0 0 0 0],'RowSpacing',5);
+sidebar.Layout.Row = 2; sidebar.Layout.Column = 1;
 rowHeights = repmat({27},1,32);
 rowHeights([1 4 9 16 20 24 29]) = {24};
 form = uigridlayout(sidebar,[32 3],'ColumnWidth',{132,'1x','1x'}, ...
@@ -181,6 +370,7 @@ plotButton = uibutton(form,'Text','导出当前图 PNG + FIG','Enable','off','Bu
 plotButton.Layout.Row = 31; plotButton.Layout.Column = [2 3];
 bundle = uibutton(form,'Text','导出全部图表与数据','Enable','off','ButtonPushedFcn',@exportBundle);
 wide(bundle,32);
+set([singleButton sweepButton bundle],'BackgroundColor',[.09 .26 .36],'FontColor','white');
 footer = uigridlayout(sidebar,[1 3],'ColumnWidth',{'1x',62,72},'Padding',[4 4 4 4], ...
     'ColumnSpacing',4,'BackgroundColor',[0.91 0.95 0.96]);
 status = uilabel(footer,'Text','请选择一次采集的日期时间文件夹。','WordWrap','on', ...
@@ -190,6 +380,7 @@ refreshButton = uibutton(footer,'Text','刷新视图','Tooltip','按当前选窗
 uibutton(footer,'Text','返回首页','ButtonPushedFcn',@(~,~) goHome(fig));
 
 tabs = uitabgroup(layout);
+tabs.Layout.Row = 2; tabs.Layout.Column = 2;
 waveTab = uitab(tabs,'Title','波形与选窗'); resultTab = uitab(tabs,'Title','TS 结果');
 barColor = [0.92 0.95 0.96]; ink = [0.12 0.28 0.33];
 waveFrame = uigridlayout(waveTab,[1 1],'RowHeight',{'1x'},'ColumnWidth',{'1x'}, ...
