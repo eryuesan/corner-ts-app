@@ -1,5 +1,5 @@
 function target_strength_app
-versionTag = 'v3.0.1';
+versionTag = 'v3.0.2';
 store = fullfile(prefdir,'corner-ts-app','versions');
 [newer,entry] = installedVersion(store,versionTag);
 if ~isempty(newer)
@@ -13,10 +13,11 @@ shell = uigridlayout(home,[5 4],'RowHeight',{48,'1x',60,72,'1x'}, ...
     'ColumnWidth',{'1x',174,174,'1x'},'Padding',[16 12 16 16], ...
     'ColumnSpacing',12,'RowSpacing',12,'BackgroundColor',mist);
 repo = 'https://github.com/eryuesan/corner-ts-app';
-manifest = []; checkJob = []; installing = false;
+manifest = []; checkJob = [];
+setappdata(home,'InstallingUpdate',false);
 updateButtons = gobjects(0); aboutFig = []; aboutUI = [];
 updateStatus = '正在检查更新…';
-releaseNotes = "App 更名为「声学目标强度分析」，适用于符合数据格式要求的目标强度测量。";
+releaseNotes = "修复更新流程清理状态时的 MATLAB 代码分析器警告。";
 hdr = makeHeader(shell,'声学目标强度分析');
 hdr.Layout.Row = 1; hdr.Layout.Column = [1 4];
 h = uilabel(shell,'Text','选择处理模式','FontSize',30,'FontWeight','bold', ...
@@ -49,18 +50,19 @@ checkUpdate();
         aboutFig.Visible = 'on';
     end
     function syncUpdate()
+        canUpdate = isempty(checkJob) && ~getappdata(home,'InstallingUpdate');
         for btn = reshape(updateButtons(isgraphics(updateButtons)),1,[])
             btn.Visible = ~isempty(manifest);
-            btn.Enable = isempty(checkJob) && ~installing;
+            btn.Enable = canUpdate;
         end
         if isempty(aboutFig) || ~isgraphics(aboutFig), return; end
         aboutUI.notes.Value = releaseNotes;
         aboutUI.status.Text = updateStatus;
-        aboutUI.check.Enable = isempty(checkJob) && ~installing;
-        aboutUI.install.Enable = isempty(checkJob) && ~installing && ~isempty(manifest);
+        aboutUI.check.Enable = canUpdate;
+        aboutUI.install.Enable = canUpdate && ~isempty(manifest);
     end
     function checkUpdate(varargin)
-        if ~isempty(checkJob) || installing, return; end
+        if ~isempty(checkJob) || getappdata(home,'InstallingUpdate'), return; end
         try
             updateStatus = '正在查询 GitHub 最新正式版…';
             opts = weboptions('ContentType','json','Timeout',15);
@@ -96,10 +98,11 @@ checkUpdate();
         syncUpdate();
     end
     function installUpdate(src,~)
-        if installing || opening || ~isempty(checkJob) || isempty(manifest), return; end
+        if getappdata(home,'InstallingUpdate') || opening || ~isempty(checkJob) || isempty(manifest), return; end
         parent = ancestor(src,'figure');
-        installing = true;
-        restore = onCleanup(@endInstall);
+        refresh = @syncUpdate;
+        restore = onCleanup(@() endInstall(home,refresh));
+        setappdata(home,'InstallingUpdate',true);
         syncUpdate();
         choice = uiconfirm(parent, ...
             '更新会重新打开 App。请先保存合置和分置页面中需要保留的结果，未保存的处理进度将在重启时清除。', ...
@@ -129,10 +132,6 @@ checkUpdate();
         end
         clear closeProgress restore
         finish();
-    end
-    function endInstall()
-        installing = false;
-        if isgraphics(home), syncUpdate(); end
     end
     function enter(index)
         if opening, return; end
@@ -167,11 +166,18 @@ checkUpdate();
         home.Visible = 'on'; page.Visible = 'off';
     end
     function finish(varargin)
-        if installing, return; end
+        if getappdata(home,'InstallingUpdate'), return; end
         if ~isempty(checkJob), cancel(checkJob); end
         if ~isempty(aboutFig) && isgraphics(aboutFig), delete(aboutFig); end
         delete(sessions(isgraphics(sessions))); delete(home);
     end
+end
+
+function endInstall(home,refresh)
+if isgraphics(home)
+    setappdata(home,'InstallingUpdate',false);
+    refresh();
+end
 end
 
 function [fig,ui] = appAbout(versionTag,repo,checkUpdate,installUpdate)
