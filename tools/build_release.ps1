@@ -1,9 +1,9 @@
-param(
+﻿param(
     [Parameter(Mandatory)][string]$Notes,
     [string]$OutputDirectory = (Join-Path ([IO.Path]::GetTempPath()) 'corner-ts-releases')
 )
 $ErrorActionPreference = 'Stop'
-$source = Join-Path (Split-Path $PSScriptRoot -Parent) '数据标准处理程序'
+$source = Split-Path $PSScriptRoot -Parent
 $code = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $source 'target_strength_app.m')
 $guide = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $source '声学目标强度分析App使用指南.md')
 $match = [regex]::Match($code, "(?m)^versionTag = '(v[0-9]+(?:\.[0-9]+){1,2})';")
